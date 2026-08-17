@@ -224,7 +224,7 @@ impl WebView {
     /// Enable or disable the web inspector. Must be enabled (or set via
     /// `WebSettings::developer_extras`) before the inspector can open.
     pub fn set_developer_extras(&self, enabled: bool) {
-        if let Some(settings) = self.inner.settings() {
+        if let Some(settings) = webkit6::prelude::WebViewExt::settings(&self.inner) {
             settings.set_enable_developer_extras(enabled);
         }
     }
