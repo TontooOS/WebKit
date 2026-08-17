@@ -1,0 +1,17 @@
+{
+    "app.name": "Browser",
+    "app.description": "TontooOS web browser built with TontooWebKit",
+    "webkit.error": "An error occurred while loading the page.",
+    "webkit.error.invalid_url": "This URL is not valid.",
+    "webkit.loading": "Loading",
+    "webkit.start_url": "Start URL",
+    "webkit.back": "Back",
+    "webkit.forward": "Forward",
+    "webkit.reload": "Reload",
+    "webkit.home": "Home",
+    "webkit.private": "Private",
+    "browser.address": "Address",
+    "browser.open": "Open",
+    "browser.load_failed": "The page could not be loaded.",
+    "browser.no_internet": "No internet connection."
+}
