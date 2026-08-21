@@ -22,6 +22,10 @@ JSON or persisted as app preferences.
 | `allow_modal_dialogs` | `bool` | `true` | JS alert/confirm/prompt |
 | `auto_play` | `AutoPlay` | `Allow` | Media autoplay policy |
 | `cache_model` | `CacheModel` | `WebBrowser` | Cache aggressiveness |
+| `page_cache` | `bool` | `true` | Keeps rendered pages in memory for instant back/forward |
+| `smooth_scrolling` | `bool` | `true` | Animated smooth scrolling |
+| `dns_prefetching` | `bool` | `true` | Prefetches DNS for links on the page |
+| `hardware_acceleration` | `bool` | `true` | GL-composited rendering (`Always` policy) |
 | `default_font_family` | `Option<String>` | `None` | Default HTML font |
 | `default_font_size` | `Option<u32>` | `None` | Default font size in px |
 | `disable_web_security` | `bool` | `false` | Disables same-origin policy |
@@ -38,11 +42,20 @@ JSON or persisted as app preferences.
 
 ### `CacheModel`
 
+The cache model controls how much decoded content (images, resources,
+rendered pages) the engine keeps in memory. It is applied on the shared
+web context when a web view is created, so every view of the process
+shares one cache pool.
+
 | Variant | Behavior |
 |---|---|
-| `DocumentViewer` | Minimal caching |
+| `DocumentViewer` | Minimal caching; images are re-fetched and re-decoded per page |
 | `WebBrowser` | Standard browser caching |
-| `PrimaryWebBrowser` | Aggressive caching |
+| `PrimaryWebBrowser` | Maps to the engine's most aggressive mode (`WebBrowser`) |
+
+> **Note:** WebKitGTK only offers three cache models. `PrimaryWebBrowser`
+> is kept for API compatibility with Apple WebKit and maps to the same
+> engine value as `WebBrowser`.
 
 ## Usage
 
@@ -54,9 +67,26 @@ let settings = WebSettings::builder()
     .webgl_enabled(true)
     .auto_play(AutoPlay::RequireUserGesture)
     .cache_model(CacheModel::WebBrowser)
+    .page_cache(true)
+    .smooth_scrolling(true)
+    .dns_prefetching(true)
+    .hardware_acceleration(true)
     .default_font_family("SF Pro Display")
     .build();
 ```
+
+## Performance Defaults
+
+The defaults are tuned for a browser-class app. For slow devices or
+embedded builds the performance switches can be relaxed individually:
+
+| Switch | Effect when disabled |
+|---|---|
+| `cache_model = DocumentViewer` | Lowest memory use; slow repeat visits |
+| `page_cache = false` | Back/forward re-renders pages from scratch |
+| `dns_prefetching = false` | No background DNS lookups for links |
+| `hardware_acceleration = false` | Software compositing; slower scrolling and video |
+| `smooth_scrolling = false` | Instant (non-animated) scroll steps |
 
 ## Serialization
 

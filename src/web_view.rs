@@ -9,7 +9,10 @@ use webkit6 as wk;
 use webkit6::prelude::*;
 
 use crate::config::{DataStoreKind, WebKitConfiguration};
-use crate::delegate::{DefaultWebViewDelegate, WebViewDelegate};
+use crate::delegate::{
+    DefaultWebViewDelegate, PermissionDecision, PermissionKind, ScriptDialogRef, WebViewDelegate,
+};
+use crate::download::{DefaultDownloadDelegate, DownloadDelegate, WebDownload};
 use crate::error::WebKitError;
 use crate::navigation::{
     load_event_to_navigation, DefaultWebNavigationDelegate, NavigationEvent, PolicyAction,
@@ -27,13 +30,14 @@ use crate::settings::WebSettings;
 ///     WebKitConfiguration::new().start_url("https://example.com"),
 /// ).expect("failed to create web view");
 ///
-/// // Get the GTK4 widget and add it to any container:
+/// // Get the GTK4 widget and add it to any GTK4 container:
 /// let widget = web_view.widget();
 /// ```
 pub struct WebView {
     inner: wk::WebView,
     delegate: Rc<RefCell<Box<dyn WebViewDelegate>>>,
     navigation: Rc<RefCell<Box<dyn WebNavigationDelegate>>>,
+    downloads: Rc<RefCell<Box<dyn DownloadDelegate>>>,
 }
 
 impl WebView {
@@ -44,6 +48,13 @@ impl WebView {
     pub fn new(config: WebKitConfiguration) -> Result<Self, WebKitError> {
         let settings = wk::Settings::new();
         config.settings.apply_to(&settings);
+
+        // The cache model lives on the shared web context. Without this the
+        // engine stays at its `DocumentViewer` default, which keeps a tiny
+        // memory cache and re-fetches/re-decodes images on every page.
+        if let Some(context) = wk::WebContext::default() {
+            context.set_cache_model(config.settings.engine_cache_model());
+        }
 
         let mut builder = wk::WebView::builder();
         match &config.data_store {
@@ -80,8 +91,10 @@ impl WebView {
             inner,
             delegate: Rc::new(RefCell::new(Box::new(DefaultWebViewDelegate))),
             navigation: Rc::new(RefCell::new(Box::new(DefaultWebNavigationDelegate))),
+            downloads: Rc::new(RefCell::new(Box::new(DefaultDownloadDelegate))),
         };
         view.connect_signals();
+        view.connect_downloads();
 
         if let Some(url) = config.start_url {
             view.load_url(&url)?;
@@ -119,6 +132,17 @@ impl WebView {
     /// Set the navigation delegate (policy and navigation callbacks).
     pub fn set_navigation_delegate(&self, delegate: Box<dyn WebNavigationDelegate>) {
         *self.navigation.borrow_mut() = delegate;
+    }
+
+    /// Set the download delegate. Without one every download is cancelled.
+    pub fn set_download_delegate(&self, delegate: Box<dyn DownloadDelegate>) {
+        *self.downloads.borrow_mut() = delegate;
+    }
+
+    /// The cookie manager of this view's network session, or `None` when
+    /// the engine has no session attached yet.
+    pub fn cookie_manager(&self) -> Option<crate::cookie::CookieManager> {
+        crate::cookie::CookieManager::from_view(self)
     }
 
     /// Load a URL. Only `http(s)`, `file`, `data` and `about` URLs are
@@ -201,6 +225,11 @@ impl WebView {
 
     /// Run JavaScript in the page and block for the JSON result.
     ///
+    /// **This blocks the UI thread** until the engine returns the result,
+    /// freezing rendering for the duration. Use it during startup or from
+    /// the C FFI; prefer [`WebView::evaluate_javascript_async`] while the
+    /// main loop is running.
+    ///
     /// ```rust,no_run
     /// use webkit::{WebKitConfiguration, WebView};
     ///
@@ -213,6 +242,36 @@ impl WebView {
             .block_on(future)
             .map_err(|e| WebKitError::Javascript(e.to_string()))?;
         Ok(crate::json::jsc_value_to_json(&result))
+    }
+
+    /// Run JavaScript in the page without blocking the UI thread.
+    ///
+    /// Returns a future that resolves when the engine has evaluated the
+    /// script. Poll it on the GLib main context (for example with
+    /// `glib::MainContext::default().spawn_local`) or await it inside an
+    /// async context that drives the default main context.
+    ///
+    /// ```rust,no_run
+    /// use webkit::{WebKitConfiguration, WebView};
+    ///
+    /// let web_view = WebView::new(WebKitConfiguration::new()).unwrap();
+    /// let future = web_view.evaluate_javascript_async("document.title").unwrap();
+    /// glib::MainContext::default().spawn_local(async move {
+    ///     if let Ok(title) = future.await {
+    ///         println!("title: {title}");
+    ///     }
+    /// });
+    /// ```
+    pub fn evaluate_javascript_async(
+        &self,
+        script: &str,
+    ) -> Result<impl std::future::Future<Output = Result<serde_json::Value, WebKitError>>, WebKitError>
+    {
+        let future = self.inner.evaluate_javascript_future(script, None, None);
+        Ok(async move {
+            let result = future.await.map_err(|e| WebKitError::Javascript(e.to_string()))?;
+            Ok(crate::json::jsc_value_to_json(&result))
+        })
     }
 
     /// Raw engine settings object (for settings not covered by
@@ -355,11 +414,110 @@ impl WebView {
         // window.open() loads into this same web view by default.
         let wv = self.inner.clone();
         self.inner.connect_create(move |_wv, _action| wv.clone().upcast());
+
+        // JavaScript dialogs. The delegate answers; an unhandled dialog
+        // gets the engine default (no UI, confirm = false, prompt = null).
+        let del = self.delegate.clone();
+        self.inner.connect_script_dialog(move |_wv, dialog| {
+            let dialog = ScriptDialogRef::from_engine(dialog);
+            del.borrow_mut().script_dialog(&dialog)
+        });
+
+        // Permission requests fail closed: the default delegate denies.
+        let del = self.delegate.clone();
+        self.inner.connect_permission_request(move |_wv, request| {
+            let kind = permission_kind(request);
+            match del.borrow_mut().permission_request(kind) {
+                PermissionDecision::Grant => {
+                    request.allow();
+                    true
+                }
+                PermissionDecision::Deny => {
+                    request.deny();
+                    true
+                }
+            }
+        });
+    }
+
+    /// Wire downloads of this view's network session to the download
+    /// delegate.
+    fn connect_downloads(&self) {
+        let session = webkit6::prelude::WebViewExt::network_session(&self.inner);
+        let Some(session) = session else {
+            return;
+        };
+        let dl = self.downloads.clone();
+        session.connect_download_started(move |_session, d| {
+            let progress = dl.clone();
+            d.connect_received_data(move |inner_d, _length| {
+                let info = WebDownload::from_engine(inner_d.clone());
+                progress.borrow_mut().download_progress(&info);
+            });
+
+            let failed = dl.clone();
+            d.connect_failed(move |inner_d, error| {
+                let info = WebDownload::from_engine(inner_d.clone());
+                failed.borrow_mut().download_failed(&info, &error.to_string());
+            });
+
+            let finished = dl.clone();
+            d.connect_finished(move |inner_d| {
+                let info = WebDownload::from_engine(inner_d.clone());
+                finished.borrow_mut().download_finished(&info);
+            });
+
+            let decide = dl.clone();
+            d.connect_decide_destination(move |inner_d, suggested_filename| {
+                let info = WebDownload::from_engine(inner_d.clone());
+                let mut delegate = decide.borrow_mut();
+                match delegate.decide_destination(&info, suggested_filename) {
+                    Some(path) => {
+                        inner_d.set_destination(&path);
+                        true
+                    }
+                    None => false,
+                }
+            });
+        });
     }
 }
 
-fn register_message_handler(ucm: &wk::UserContentManager, handler: ScriptMessageHandler) {
-    let name = handler.name.clone();
+/// Map an engine permission request onto a [`PermissionKind`].
+fn permission_kind(request: &wk::PermissionRequest) -> PermissionKind {
+    if let Some(media) = request.downcast_ref::<wk::UserMediaPermissionRequest>() {
+        return match (media.is_for_audio_device(), media.is_for_video_device()) {
+            (true, true) => PermissionKind::CameraAndMicrophone,
+            (true, false) => PermissionKind::Microphone,
+            (false, true) => PermissionKind::Camera,
+            (false, false) => PermissionKind::Other,
+        };
+    }
+    if request.is::<wk::GeolocationPermissionRequest>() {
+        return PermissionKind::Geolocation;
+    }
+    if request.is::<wk::NotificationPermissionRequest>() {
+        return PermissionKind::Notifications;
+    }
+    if request.is::<wk::ClipboardPermissionRequest>() {
+        return PermissionKind::ClipboardRead;
+    }
+    if request.is::<wk::DeviceInfoPermissionRequest>() {
+        return PermissionKind::DeviceInfo;
+    }
+    if request.is::<wk::PointerLockPermissionRequest>() {
+        return PermissionKind::PointerLock;
+    }
+    if request.is::<wk::MediaKeySystemPermissionRequest>() {
+        return PermissionKind::MediaKeySystem;
+    }
+    if request.is::<wk::WebsiteDataAccessPermissionRequest>() {
+        return PermissionKind::WebsiteDataAccess;
+    }
+    PermissionKind::Other
+}
+
+fn register_message_handler(ucm: &wk::UserContentManager, handler: ScriptMessageHandler) {    let name = handler.name.clone();
     if ucm.register_script_message_handler(&name, None) {
         let body = handler.body;
         ucm.connect_script_message_received(Some(&name), move |_ucm, value| {
@@ -369,12 +527,13 @@ fn register_message_handler(ucm: &wk::UserContentManager, handler: ScriptMessage
     }
 }
 
+/// Only these schemes may be loaded. Everything else (notably
+/// `javascript:` and unknown custom schemes) is rejected.
+const ALLOWED_URL_PREFIXES: [&str; 5] = ["http://", "https://", "file://", "data:", "about:"];
+
 fn validate_url(url: &str) -> Result<(), WebKitError> {
-    let valid = url.contains("://")
-        || url.starts_with("about:")
-        || url.starts_with("data:")
-        || url.starts_with("file:");
-    if valid {
+    let lower = url.to_ascii_lowercase();
+    if ALLOWED_URL_PREFIXES.iter().any(|p| lower.starts_with(p)) {
         Ok(())
     } else {
         Err(WebKitError::InvalidUrl(url.to_string()))

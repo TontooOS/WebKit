@@ -43,8 +43,10 @@
 //! ```
 
 pub mod config;
+pub mod cookie;
 pub mod data_store;
 pub mod delegate;
+pub mod download;
 pub mod error;
 pub mod ffi;
 pub mod json;
@@ -56,8 +58,13 @@ pub mod uikit_view;
 pub mod web_view;
 
 pub use config::{DataStoreKind, WebKitConfiguration};
+pub use cookie::{Cookie, CookieAcceptPolicy, CookieManager, CookieStorage};
 pub use data_store::{WebsiteData, WebsiteDataType, WebsiteDataStore};
-pub use delegate::WebViewDelegate;
+pub use delegate::{
+    DefaultWebViewDelegate, PermissionDecision, PermissionKind, ScriptDialogKind, ScriptDialogRef,
+    WebViewDelegate,
+};
+pub use download::{DefaultDownloadDelegate, DownloadDelegate, WebDownload};
 pub use error::WebKitError;
 pub use navigation::{NavigationAction, NavigationEvent, PolicyAction, WebNavigationDelegate};
 pub use script::{ScriptFrameInjection, ScriptInjectionTime, ScriptMessageHandler, WebScript};
@@ -71,10 +78,13 @@ pub const WEBKIT_VERSION: (u32, u32, u32) = (26, 1, 0);
 /// Convenience re-exports for a single `use webkit::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        AutoPlay, CacheModel, DataStoreKind, NavigationAction, NavigationEvent, PolicyAction,
-        ScriptFrameInjection, ScriptInjectionTime, ScriptMessageHandler, WebKitConfiguration,
-        WebKitError, WebNavigationDelegate, WebScript, WebSettings, WebView, WebViewBuilder,
-        WebViewContent, WebViewDelegate, WebsiteData, WebsiteDataType, WebsiteDataStore,
+        AutoPlay, CacheModel, Cookie, CookieAcceptPolicy, CookieManager, CookieStorage,
+        DataStoreKind, DefaultDownloadDelegate, DefaultWebViewDelegate, DownloadDelegate,
+        NavigationAction, NavigationEvent, PermissionDecision, PermissionKind, PolicyAction,
+        ScriptDialogKind, ScriptDialogRef, ScriptFrameInjection, ScriptInjectionTime,
+        ScriptMessageHandler, WebDownload, WebKitConfiguration, WebKitError, WebNavigationDelegate,
+        WebScript, WebSettings, WebView, WebViewBuilder, WebViewContent, WebViewDelegate,
+        WebsiteData, WebsiteDataType, WebsiteDataStore,
     };
     pub use crate::WEBKIT_VERSION;
 }

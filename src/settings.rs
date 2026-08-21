@@ -63,6 +63,17 @@ pub struct WebSettings {
     pub auto_play: AutoPlay,
     /// Cache model.
     pub cache_model: CacheModel,
+    /// Whether the page cache keeps rendered pages in memory for instant
+    /// back/forward navigation. Defaults to `true`.
+    pub page_cache: bool,
+    /// Whether scrolling is animated smoothly. Defaults to `true`.
+    pub smooth_scrolling: bool,
+    /// Whether the engine prefetches DNS for links on the page. Defaults to
+    /// `true`.
+    pub dns_prefetching: bool,
+    /// Whether the view composites through hardware acceleration (GL).
+    /// Defaults to `true`.
+    pub hardware_acceleration: bool,
     /// Default font family for HTML content.
     pub default_font_family: Option<String>,
     /// Default font size in pixels.
@@ -88,6 +99,10 @@ impl WebSettings {
             allow_modal_dialogs: true,
             auto_play: AutoPlay::Allow,
             cache_model: CacheModel::WebBrowser,
+            page_cache: true,
+            smooth_scrolling: true,
+            dns_prefetching: true,
+            hardware_acceleration: true,
             default_font_family: None,
             default_font_size: None,
             disable_web_security: false,
@@ -97,6 +112,18 @@ impl WebSettings {
     /// Builder-style entry point.
     pub fn builder() -> WebSettingsBuilder {
         WebSettingsBuilder::default()
+    }
+
+    /// Map the cache model onto the engine's context-level cache model.
+    ///
+    /// The engine applies the cache model on the shared web context.
+    /// `CacheModel::PrimaryWebBrowser` maps to the engine's most aggressive
+    /// model (`WebBrowser`), which is the strongest mode WebKitGTK offers.
+    pub(crate) fn engine_cache_model(&self) -> wk::CacheModel {
+        match self.cache_model {
+            CacheModel::DocumentViewer => wk::CacheModel::DocumentViewer,
+            CacheModel::WebBrowser | CacheModel::PrimaryWebBrowser => wk::CacheModel::WebBrowser,
+        }
     }
 
     pub(crate) fn apply_to(&self, s: &wk::Settings) {
@@ -112,6 +139,16 @@ impl WebSettings {
         s.set_allow_modal_dialogs(self.allow_modal_dialogs);
         s.set_user_agent(self.user_agent.as_deref());
         s.set_disable_web_security(self.disable_web_security);
+
+        // Performance-relevant engine switches.
+        s.set_enable_page_cache(self.page_cache);
+        s.set_enable_smooth_scrolling(self.smooth_scrolling);
+        s.set_enable_dns_prefetching(self.dns_prefetching);
+        s.set_hardware_acceleration_policy(if self.hardware_acceleration {
+            wk::HardwareAccelerationPolicy::Always
+        } else {
+            wk::HardwareAccelerationPolicy::Never
+        });
 
         match self.auto_play {
             AutoPlay::Allow => {}
@@ -212,6 +249,26 @@ impl WebSettingsBuilder {
 
     pub fn cache_model(mut self, model: CacheModel) -> Self {
         self.settings.cache_model = model;
+        self
+    }
+
+    pub fn page_cache(mut self, enabled: bool) -> Self {
+        self.settings.page_cache = enabled;
+        self
+    }
+
+    pub fn smooth_scrolling(mut self, enabled: bool) -> Self {
+        self.settings.smooth_scrolling = enabled;
+        self
+    }
+
+    pub fn dns_prefetching(mut self, enabled: bool) -> Self {
+        self.settings.dns_prefetching = enabled;
+        self
+    }
+
+    pub fn hardware_acceleration(mut self, enabled: bool) -> Self {
+        self.settings.hardware_acceleration = enabled;
         self
     }
 
