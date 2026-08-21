@@ -49,6 +49,7 @@ pub mod delegate;
 pub mod download;
 pub mod error;
 pub mod ffi;
+pub mod geolocation;
 pub mod json;
 pub mod lang;
 pub mod navigation;
@@ -66,6 +67,7 @@ pub use delegate::{
 };
 pub use download::{DefaultDownloadDelegate, DownloadDelegate, WebDownload};
 pub use error::WebKitError;
+pub use geolocation::attach_core_location;
 pub use navigation::{NavigationAction, NavigationEvent, PolicyAction, WebNavigationDelegate};
 pub use script::{ScriptFrameInjection, ScriptInjectionTime, ScriptMessageHandler, WebScript};
 pub use settings::{AutoPlay, CacheModel, WebSettings, WebSettingsBuilder};
@@ -78,10 +80,10 @@ pub const WEBKIT_VERSION: (u32, u32, u32) = (26, 1, 0);
 /// Convenience re-exports for a single `use webkit::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        AutoPlay, CacheModel, Cookie, CookieAcceptPolicy, CookieManager, CookieStorage,
-        DataStoreKind, DefaultDownloadDelegate, DefaultWebViewDelegate, DownloadDelegate,
-        NavigationAction, NavigationEvent, PermissionDecision, PermissionKind, PolicyAction,
-        ScriptDialogKind, ScriptDialogRef, ScriptFrameInjection, ScriptInjectionTime,
+        attach_core_location, AutoPlay, CacheModel, Cookie, CookieAcceptPolicy, CookieManager,
+        CookieStorage, DataStoreKind, DefaultDownloadDelegate, DefaultWebViewDelegate,
+        DownloadDelegate, NavigationAction, NavigationEvent, PermissionDecision, PermissionKind,
+        PolicyAction, ScriptDialogKind, ScriptDialogRef, ScriptFrameInjection, ScriptInjectionTime,
         ScriptMessageHandler, WebDownload, WebKitConfiguration, WebKitError, WebNavigationDelegate,
         WebScript, WebSettings, WebView, WebViewBuilder, WebViewContent, WebViewDelegate,
         WebsiteData, WebsiteDataType, WebsiteDataStore,

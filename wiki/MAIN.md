@@ -26,6 +26,7 @@ is no Chromium code in the stack.
 | Cookies | [Cookies.md](Cookies.md) | Cookie accept policy, read/write, persistence |
 | Downloads | [Downloads.md](Downloads.md) | Download delegate and save-location handling |
 | DialogsAndPermissions | [DialogsAndPermissions.md](DialogsAndPermissions.md) | JS dialogs and permission requests |
+| Geolocation | [Geolocation.md](Geolocation.md) | Page geolocation backed by CoreLocation |
 | FFI | [Ffi.md](Ffi.md) | C API and `Headers/webkit.h` |
 | UIKit | [UIKit.md](UIKit.md) | Embedding in UIKit apps via `WebViewContent` |
 
@@ -62,6 +63,7 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
   +-- WebScript / ScriptMessageHandler   (injected JS + message bridge)
   +-- WebsiteDataStore   (default / ephemeral / custom + clear)
   +-- CookieManager      (accept policy, read/write cookies, persistence)
+  +-- Geolocation        (CoreLocation-backed position provider)
   |
   +-- FFI                (C ABI, Headers/webkit.h)
   +-- WebViewContent     (uikit::view::ViewContent for UIKit apps)
@@ -94,6 +96,9 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
 
 ## Changelog
 
+- 2026-08-21: Geolocation -- `attach_core_location` feeds page positions
+  from CoreLocation (GPS/WiFi/IP) through the engine geolocation manager;
+  no Geoclue needed. Permission per page still required.
 - 2026-08-21: Security and completeness pass -- strict URL scheme
   allowlist in `load_url` (rejects `javascript:` and unknown schemes),
   download delegate (`DownloadDelegate`, `WebDownload`), cookie manager

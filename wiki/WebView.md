@@ -188,3 +188,4 @@ web_view.toggle_inspector(); // opens the WebKit web inspector
 - [Navigation.md](Navigation.md) -- navigation and view delegates
 - [JavaScript.md](JavaScript.md) -- evaluation details and value mapping
 - [UIKit.md](UIKit.md) -- embedding in UIKit apps
+- [Geolocation.md](Geolocation.md) -- page geolocation via CoreLocation

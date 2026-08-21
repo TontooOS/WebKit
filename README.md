@@ -2,10 +2,6 @@
 
 Web content framework for TontooOS. An Apple-WebKit API for embedding a browser in your app
 
-## Documentation
-
-See the [wiki/MAIN.md](wiki/MAIN.md) for the full documentation.
-
 ## Made for TontooOS
 
 Explore more at https://github.com/TontooOS/Libs
