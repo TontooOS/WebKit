@@ -12,7 +12,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-webkit = { path = "/Library/System/webkit" }
+sdk = { path = "/Library/System/sdk", features = ["WebKit"] }
+```
+
+Then at the crate root:
+
+```rust
+sdk::preinclude!();
+use WebKit::{ /* ... */ };
 ```
 
 ## License
