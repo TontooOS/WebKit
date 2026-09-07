@@ -15,13 +15,6 @@ Add to your `Cargo.toml`:
 sdk = { path = "/Library/System/sdk", features = ["WebKit"] }
 ```
 
-Then at the crate root:
-
-```rust
-sdk::preinclude!();
-use WebKit::{ /* ... */ };
-```
-
 ## License
 
 MIT
