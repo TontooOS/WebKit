@@ -1,23 +1,20 @@
-//! TontooOS browser demo app built with UIKit + TontooWebKit.
+//! TontooOS browser demo app built with GTK4 + TontooWebKit (legacy backend).
 //!
-//! Shows how to embed a [`webkit::WebView`] in a UIKit app. The toolbar is
-//! plain GTK4 so the buttons can capture the (non-`Send`) web view directly;
-//! everything else follows the normal UIKit `App` / `AppDelegate` / `Widget`
-//! flow.
+//! Shows how to embed a [`webkit::GtkWebView`] in a GTK4 app: toolbar with
+//! back/forward/reload, an address entry, a status bar with hovered-link
+//! URLs and a WebKit process performance view (F12).
 //!
-//! Run with: `cargo run --example browser`
+//! Run with: `cargo run --example browser --features gtk-backend`
 
 use gtk::prelude::*;
 use webkit6::prelude::*;
-use uikit::app::{App, AppDelegate, ColorScheme};
-use uikit::widget::{apply_css, Widget, WidgetId};
-use webkit::{lang, WebKitConfiguration, WebSettings, WebView};
+use webkit::{GtkWebView, WebKitConfiguration, WebSettings, lang};
 
 const START_URL: &str = "https://example.com";
 
 #[derive(Clone)]
 struct BrowserState {
-    web_view: std::rc::Rc<std::cell::RefCell<Option<WebView>>>,
+    web_view: std::rc::Rc<std::cell::RefCell<Option<GtkWebView>>>,
     status: gtk::Label,
 }
 
@@ -46,7 +43,7 @@ fn normalize_url(input: &str) -> String {
     }
 }
 
-fn navigate(web_view: &std::rc::Rc<std::cell::RefCell<Option<WebView>>>, status: &gtk::Label, input: &str) {
+fn navigate(web_view: &std::rc::Rc<std::cell::RefCell<Option<GtkWebView>>>, status: &gtk::Label, input: &str) {
     let url = normalize_url(input);
     match web_view.borrow().as_ref().map(|web| web.load_url(&url)) {
         Some(Ok(())) => {}
@@ -202,18 +199,6 @@ fn show_performance_window() {
     window.present();
 }
 
-struct BrowserContent {
-    state: BrowserState,
-}
-
-impl BrowserContent {
-    fn new() -> Self {
-        Self {
-            state: BrowserState::new(),
-        }
-    }
-}
-
 struct BrowserDelegate {
     status: gtk::Label,
 }
@@ -231,183 +216,185 @@ impl webkit::WebViewDelegate for BrowserDelegate {
     }
 }
 
-impl Widget for BrowserContent {
-    fn id(&self) -> WidgetId {
-        0
-    }
-
-    fn to_gtk(&self) -> gtk::Widget {
-        let state = &self.state;
-        let web_view = state.web_view.clone();
-
-        let web = WebView::new(
-            WebKitConfiguration::new()
-                .start_url(START_URL)
-                .settings(
-                    WebSettings::builder()
-                        .user_agent("TontooOS, AppleWebKit")
-                        .javascript_enabled(true)
-                        .build(),
-                ),
-        )
-        .expect("failed to create web view");
-        web.set_delegate(Box::new(BrowserDelegate {
-            status: state.status.clone(),
-        }));
-
-        // Show the hovered link in the status bar; fall back to the
-        // current page URL when the pointer leaves a link.
-        let status = state.status.clone();
-        web.inner().connect_mouse_target_changed(move |wv, hit, _mods| {
-            if let Some(link) = hit.link_uri() {
-                status.set_text(link.as_str());
-            } else {
-                let url = wv.uri().map(|u| u.to_string()).unwrap_or_default();
-                status.set_text(url.as_str());
-            }
-        });
-        *web_view.borrow_mut() = Some(web);
-
-        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        toolbar.add_css_class("webkit-toolbar");
-        apply_css(
-            &toolbar,
-            ".webkit-toolbar { background-color: #1d1d1d; padding: 6px; }
-             .webkit-toolbar button {
-                 background-color: #2a2a2c;
-                 color: #ececec;
-                 border: 1px solid rgba(255, 255, 255, 0.12);
-                 border-radius: 6px;
-                 padding: 4px 12px;
-                 font-family: 'SF Pro Display';
-             }
-             .webkit-toolbar button:hover { background-color: #3a3a3c; }
-             .webkit-toolbar entry {
-                 background-color: #2a2a2c;
-                 color: #ececec;
-                 caret-color: #ececec;
-                 border: 1px solid rgba(255, 255, 255, 0.12);
-                 border-radius: 6px;
-             }
-             .webkit-status { color: #a0a0a0; font-family: 'SF Pro Display'; font-size: 11px; }",
-        );
-
-        let back = gtk::Button::with_label(&lang::t_or("webkit.back", "Back"));
-        let w = web_view.clone();
-        back.connect_clicked(move |_| {
-            if let Some(v) = w.borrow().as_ref() {
-                v.go_back();
-            }
-        });
-        toolbar.append(&back);
-
-        let forward = gtk::Button::with_label(&lang::t_or("webkit.forward", "Forward"));
-        let w = web_view.clone();
-        forward.connect_clicked(move |_| {
-            if let Some(v) = w.borrow().as_ref() {
-                v.go_forward();
-            }
-        });
-        toolbar.append(&forward);
-
-        let reload = gtk::Button::with_label(&lang::t_or("webkit.reload", "Reload"));
-        let w = web_view.clone();
-        reload.connect_clicked(move |_| {
-            if let Some(v) = w.borrow().as_ref() {
-                v.reload();
-            }
-        });
-        toolbar.append(&reload);
-
-        let perf_btn = gtk::Button::with_label("Performance");
-        perf_btn.connect_clicked(move |_| show_performance_window());
-        toolbar.append(&perf_btn);
-
-        let entry = gtk::Entry::new();
-        entry.set_placeholder_text(Some(&lang::t_or("browser.address", "Address")));
-        entry.set_text(START_URL);
-        let status = state.status.clone();
-        let w = web_view.clone();
-        entry.connect_activate(move |entry| {
-            navigate(&w, &status, &entry.text());
-        });
-        entry.set_hexpand(true);
-        toolbar.append(&entry);
-
-        let open = gtk::Button::with_label(&lang::t_or("browser.open", "Open"));
-        let entry = entry.clone();
-        let status = state.status.clone();
-        let w = web_view.clone();
-        open.connect_clicked(move |_| {
-            navigate(&w, &status, &entry.text());
-        });
-        toolbar.append(&open);
-
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.append(&toolbar);
-
-        let web_widget = web_view
-            .borrow()
-            .as_ref()
-            .map(|v| v.widget())
-            .expect("web view was created above");
-        web_widget.set_vexpand(true);
-        root.append(&web_widget);
-
-        // Status bar with a summary of WebKit process CPU / memory.
-        let statusbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        statusbar.set_margin_top(4);
-        statusbar.set_margin_bottom(4);
-        state.status.set_halign(gtk::Align::Start);
-        state.status.set_hexpand(true);
-        // Cap the natural width so long URLs ellipsize instead of
-        // resizing the window.
-        state.status.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        state.status.set_max_width_chars(64);
-        state.status.add_css_class("webkit-status");
-        statusbar.append(&state.status);
-
-        let perf_label = gtk::Label::new(None);
-        perf_label.add_css_class("webkit-status");
-        let perf = perf_label.clone();
-        glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-            let (count, cpu, mem) = webkit_process_summary();
-            perf.set_text(&format!(
-                "WebKit: {count} process(es)  CPU {cpu:5.1}%  MEM {:>7.1} MB",
-                mem as f64 / 1_048_576.0
-            ));
-            glib::ControlFlow::Continue
-        });
-        statusbar.append(&perf_label);
-
-        root.append(&statusbar);
-
-        // F12 opens the performance window.
-        let key_controller = gtk::EventControllerKey::new();
-        key_controller.connect_key_pressed(move |_ctrl, key, _code, _state| {
-            if key == gtk::gdk::Key::F12 {
-                show_performance_window();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        root.add_controller(key_controller);
-
-        root.upcast()
-    }
+fn apply_toolbar_css() {
+    let css = ".webkit-toolbar { background-color: #1d1d1d; padding: 6px; }
+         .webkit-toolbar button {
+             background-color: #2a2a2c;
+             color: #ececec;
+             border: 1px solid rgba(255, 255, 255, 0.12);
+             border-radius: 6px;
+             padding: 4px 12px;
+             font-family: 'SF Pro Display';
+         }
+         .webkit-toolbar button:hover { background-color: #3a3a3c; }
+         .webkit-toolbar entry {
+             background-color: #2a2a2c;
+             color: #ececec;
+             caret-color: #ececec;
+             border: 1px solid rgba(255, 255, 255, 0.12);
+             border-radius: 6px;
+         }
+         .webkit-status { color: #a0a0a0; font-family: 'SF Pro Display'; font-size: 11px; }";
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(css);
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().expect("display"),
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
-struct BrowserApp;
+fn build_ui(app: &gtk::Application) {
+    apply_toolbar_css();
+    let state = BrowserState::new();
 
-impl AppDelegate for BrowserApp {
-    fn view(&self) -> Box<dyn Widget> {
-        Box::new(BrowserContent::new())
-    }
+    let web = GtkWebView::new(
+        WebKitConfiguration::new()
+            .start_url(START_URL)
+            .settings(
+                WebSettings::builder()
+                    .user_agent("TontooOS, AppleWebKit")
+                    .javascript_enabled(true)
+                    .build(),
+            ),
+    )
+    .expect("failed to create web view");
+    web.set_delegate(Box::new(BrowserDelegate {
+        status: state.status.clone(),
+    }));
+
+    // Show the hovered link in the status bar; fall back to the
+    // current page URL when the pointer leaves a link.
+    let status = state.status.clone();
+    web.inner().connect_mouse_target_changed(move |wv, hit, _mods| {
+        if let Some(link) = hit.link_uri() {
+            status.set_text(link.as_str());
+        } else {
+            let url = wv.uri().map(|u| u.to_string()).unwrap_or_default();
+            status.set_text(url.as_str());
+        }
+    });
+    *state.web_view.borrow_mut() = Some(web);
+
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    toolbar.add_css_class("webkit-toolbar");
+
+    let back = gtk::Button::with_label(&lang::t_or("webkit.back", "Back"));
+    let w = state.web_view.clone();
+    back.connect_clicked(move |_| {
+        if let Some(v) = w.borrow().as_ref() {
+            v.go_back();
+        }
+    });
+    toolbar.append(&back);
+
+    let forward = gtk::Button::with_label(&lang::t_or("webkit.forward", "Forward"));
+    let w = state.web_view.clone();
+    forward.connect_clicked(move |_| {
+        if let Some(v) = w.borrow().as_ref() {
+            v.go_forward();
+        }
+    });
+    toolbar.append(&forward);
+
+    let reload = gtk::Button::with_label(&lang::t_or("webkit.reload", "Reload"));
+    let w = state.web_view.clone();
+    reload.connect_clicked(move |_| {
+        if let Some(v) = w.borrow().as_ref() {
+            v.reload();
+        }
+    });
+    toolbar.append(&reload);
+
+    let perf_btn = gtk::Button::with_label("Performance");
+    perf_btn.connect_clicked(move |_| show_performance_window());
+    toolbar.append(&perf_btn);
+
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some(&lang::t_or("browser.address", "Address")));
+    entry.set_text(START_URL);
+    let status = state.status.clone();
+    let w = state.web_view.clone();
+    entry.connect_activate(move |entry| {
+        navigate(&w, &status, &entry.text());
+    });
+    entry.set_hexpand(true);
+    toolbar.append(&entry);
+
+    let open = gtk::Button::with_label(&lang::t_or("browser.open", "Open"));
+    let entry = entry.clone();
+    let status = state.status.clone();
+    let w = state.web_view.clone();
+    open.connect_clicked(move |_| {
+        navigate(&w, &status, &entry.text());
+    });
+    toolbar.append(&open);
+
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.append(&toolbar);
+
+    let web_widget = state
+        .web_view
+        .borrow()
+        .as_ref()
+        .map(|v| v.widget())
+        .expect("web view was created above");
+    web_widget.set_vexpand(true);
+    root.append(&web_widget);
+
+    // Status bar with a summary of WebKit process CPU / memory.
+    let statusbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    statusbar.set_margin_top(4);
+    statusbar.set_margin_bottom(4);
+    state.status.set_halign(gtk::Align::Start);
+    state.status.set_hexpand(true);
+    // Cap the natural width so long URLs ellipsize instead of
+    // resizing the window.
+    state.status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    state.status.set_max_width_chars(64);
+    state.status.add_css_class("webkit-status");
+    statusbar.append(&state.status);
+
+    let perf_label = gtk::Label::new(None);
+    perf_label.add_css_class("webkit-status");
+    let perf = perf_label.clone();
+    glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+        let (count, cpu, mem) = webkit_process_summary();
+        perf.set_text(&format!(
+            "WebKit: {count} process(es)  CPU {cpu:5.1}%  MEM {:>7.1} MB",
+            mem as f64 / 1_048_576.0
+        ));
+        glib::ControlFlow::Continue
+    });
+    statusbar.append(&perf_label);
+
+    root.append(&statusbar);
+
+    // F12 opens the performance window.
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_ctrl, key, _code, _state| {
+        if key == gtk::gdk::Key::F12 {
+            show_performance_window();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    root.add_controller(key_controller);
+
+    let window = gtk::ApplicationWindow::builder()
+        .application(app)
+        .title(lang::t_or("app.name", "Browser"))
+        .default_width(1000)
+        .default_height(680)
+        .child(&root)
+        .build();
+    window.present();
 }
 
-fn main() {
-    let mut app = App::new(lang::t_or("app.name", "Browser"), 1000, 680);
-    app.set_color_scheme(ColorScheme::Dark);
-    app.set_delegate(BrowserApp);
-    app.run();
+fn main() -> glib::ExitCode {
+    let app = gtk::Application::builder()
+        .application_id("org.tontoo.webkit.browser")
+        .build();
+    app.connect_activate(build_ui);
+    app.run()
 }

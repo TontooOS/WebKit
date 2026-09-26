@@ -15,6 +15,8 @@ use crate::error::WebKitError;
 #[cfg(feature = "gtk-backend")]
 use crate::web_view::WebView;
 
+use serde::{Deserialize, Serialize};
+
 /// Which cookies the engine accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CookieAcceptPolicy {
@@ -66,7 +68,7 @@ impl CookieStorage {
 }
 
 /// A single HTTP cookie.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cookie {
     /// Cookie name.
     pub name: String,

@@ -4,6 +4,12 @@ The `WebView` is the core widget of TontooWebKit. It renders web content
 and exposes navigation, history, zoom, JavaScript evaluation and state
 observation, mirroring Apple's `WKWebView`.
 
+> **Note:** this page describes the backend-neutral view (default
+> `vello` feature), which exposes frames via `poll_frame` instead of a
+> toolkit widget. The legacy GTK view lives on as `GtkWebView`
+> (`gtk-backend` feature) with the same navigation API plus `widget()`.
+> See [Backend.md](Backend.md) for the engine split.
+
 ## Constructors
 
 ### `WebView::new`
@@ -35,9 +41,9 @@ let web_view = WebView::builder()
     .expect("invalid start URL");
 ```
 
-## Widget Access
+## Widget Access (GTK Backend Only)
 
-### `WebView::widget`
+### `GtkWebView::widget`
 
 ```rust
 pub fn widget(&self) -> gtk::Widget

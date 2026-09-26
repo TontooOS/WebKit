@@ -4,6 +4,8 @@
 #[cfg(feature = "gtk-backend")]
 use webkit6 as wk;
 
+use serde::{Deserialize, Serialize};
+
 /// Trait for observing web view state changes.
 ///
 /// All methods have default implementations, so implementing the trait only
@@ -60,7 +62,7 @@ pub struct DefaultWebViewDelegate;
 impl WebViewDelegate for DefaultWebViewDelegate {}
 
 /// The kind of a JavaScript dialog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScriptDialogKind {
     /// `window.alert(message)`
     Alert,
@@ -128,6 +130,8 @@ pub struct ScriptDialogRef {
     kind: ScriptDialogKind,
     message: String,
     prompt_default: Option<String>,
+    confirmed: std::cell::Cell<Option<bool>>,
+    prompt_text: std::cell::Cell<Option<String>>,
 }
 
 #[cfg(not(feature = "gtk-backend"))]
@@ -142,6 +146,8 @@ impl ScriptDialogRef {
             kind,
             message: message.into(),
             prompt_default,
+            confirmed: std::cell::Cell::new(None),
+            prompt_text: std::cell::Cell::new(None),
         }
     }
 
@@ -161,14 +167,23 @@ impl ScriptDialogRef {
     }
 
     /// Answer a `prompt` dialog with text.
-    pub fn set_prompt_text(&self, _text: &str) {}
+    pub fn set_prompt_text(&self, text: &str) {
+        self.prompt_text.set(Some(text.to_string()));
+    }
 
     /// Answer a `confirm` or before-unload dialog.
-    pub fn set_confirmed(&self, _confirmed: bool) {}
+    pub fn set_confirmed(&self, confirmed: bool) {
+        self.confirmed.set(Some(confirmed));
+    }
+
+    /// Take the recorded answer: `(confirmed, prompt_text)`.
+    pub fn take_answer(&self) -> (Option<bool>, Option<String>) {
+        (self.confirmed.take(), self.prompt_text.take())
+    }
 }
 
 /// What a page can ask permission for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionKind {
     /// Camera access.
     Camera,

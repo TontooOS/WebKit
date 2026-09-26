@@ -29,7 +29,7 @@ WebKitGTK backend stays available behind the `gtk-backend` cargo feature.
 | Downloads | [Downloads.md](Downloads.md) | Download delegate and save-location handling |
 | DialogsAndPermissions | [DialogsAndPermissions.md](DialogsAndPermissions.md) | JS dialogs and permission requests |
 | Geolocation | [Geolocation.md](Geolocation.md) | Page geolocation backed by CoreLocation |
-| FFI | [Ffi.md](Ffi.md) | C API and `Headers/webkit.h` (`gtk-backend` only) |
+| FFI | [Ffi.md](Ffi.md) | C APIs: `webkit.h` (GTK) and `webkit_vello.h` (Vello) |
 | UIKit | [UIKit.md](UIKit.md) | Legacy GTK embedding shim (deprecated) |
 | Backend | [Backend.md](Backend.md) | Engine trait, WPE plan, cargo features, IPC |
 
@@ -58,9 +58,11 @@ See [WebView.md](WebView.md), [Backend.md](Backend.md) and the
 WebKitConfiguration (start URL, settings, scripts, handlers, data store)
   |
   +-- WebView (backend-neutral, view.rs)
-  |     +-- WebEngine trait (engine.rs: MockEngine now, WPE helper planned)
+  |     +-- WebEngine trait (engine.rs: MockEngine, ProcessEngine)
+  |     +-- tontoo-webengine helper (frame files + line protocol)
   |     +-- SharedFrame (BGRA pixels -> Vello texture via WebViewContent)
   |     +-- WebViewDelegate / WebNavigationDelegate / DownloadDelegate
+  |     +-- Vello C ABI (ffi_vello.rs, Headers/webkit_vello.h)
   |
   +-- WebSettings / WebScript / ScriptMessageHandler (serializable)
   +-- TontooUI: WebViewContent (tontooui::View, texture blit + input)
@@ -96,6 +98,13 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
 
 ## Changelog
 
+- 2026-09-26: Full Vello loop -- `tontoo-webengine` helper (line
+  protocol, frame files, `--ping` self test), `ProcessEngine` transport
+  with helper discovery and mock fallback, JS/cookie id correlation with
+  5 s timeout, dialog/permission/download answers through the delegates,
+  Vello C ABI (`Headers/webkit_vello.h`, `ffi_vello.rs`), `vello_browser`
+  demo (toolbar, address field, progress, status), `tests/process.rs`
+  round-trip. GTK examples ported to pure GTK4 (`GtkWebView`).
 - 2026-09-26: Vello backend split -- backend-neutral `WebView`
   (`WebEngine` trait, `SharedFrame`, `EngineCommand`/`EngineEvent`,
   `MockEngine`), `WebViewContent` for TontooUI texture blit, `vello`

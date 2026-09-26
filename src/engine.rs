@@ -15,6 +15,9 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cookie::Cookie;
+use crate::delegate::{PermissionKind, ScriptDialogKind};
+
 /// Only these schemes may be loaded. Everything else (notably
 /// `javascript:` and unknown custom schemes) is rejected.
 pub const ALLOWED_URL_PREFIXES: [&str; 5] =
@@ -119,6 +122,46 @@ pub enum EngineCommand {
     GoBack,
     GoForward,
     Stop,
+    /// Answer a script dialog (`ScriptDialog` event id).
+    DialogAnswer {
+        id: u64,
+        confirmed: bool,
+        text: Option<String>,
+    },
+    /// Answer a permission request (`PermissionRequest` event id).
+    PermissionAnswer {
+        id: u64,
+        granted: bool,
+    },
+    /// Choose a download destination (`DownloadStarted` event id).
+    /// `None` cancels the download.
+    DownloadDestination {
+        id: u64,
+        path: Option<String>,
+    },
+    /// Cancel an in-progress download.
+    CancelDownload {
+        id: u64,
+    },
+    /// Clear stored website data in the engine.
+    ClearData {
+        cookies: bool,
+        cache: bool,
+    },
+    /// List cookies of the engine store (answered by `Cookies`).
+    ListCookies {
+        id: u64,
+    },
+    /// Add or update a cookie in the engine store.
+    AddCookie {
+        cookie: Cookie,
+    },
+    /// Delete the cookie matching domain, path and name.
+    DeleteCookie {
+        domain: String,
+        path: String,
+        name: String,
+    },
 }
 
 /// Events sent from the engine process back to the UI.
@@ -147,6 +190,44 @@ pub enum EngineEvent {
     JsResult {
         id: u64,
         result: serde_json::Value,
+    },
+    /// The page requested a JavaScript dialog. Answer with
+    /// [`EngineCommand::DialogAnswer`].
+    ScriptDialog {
+        id: u64,
+        kind: ScriptDialogKind,
+        message: String,
+        prompt_default: Option<String>,
+    },
+    /// The page requested a permission. Answer with
+    /// [`EngineCommand::PermissionAnswer`].
+    PermissionRequest {
+        id: u64,
+        kind: PermissionKind,
+    },
+    /// A download started. Answer with
+    /// [`EngineCommand::DownloadDestination`].
+    DownloadStarted {
+        id: u64,
+        uri: Option<String>,
+        suggested_filename: String,
+    },
+    DownloadProgress {
+        id: u64,
+        progress: f64,
+        received_bytes: u64,
+    },
+    DownloadFinished {
+        id: u64,
+    },
+    DownloadFailed {
+        id: u64,
+        error: String,
+    },
+    /// Cookie list answer for [`EngineCommand::ListCookies`].
+    Cookies {
+        id: u64,
+        cookies: Vec<Cookie>,
     },
     ReadyToShow,
 }
@@ -184,6 +265,23 @@ pub trait WebEngine: Send + Sync {
             height: height.max(1),
             scale,
         });
+    }
+
+    /// Drain events queued by the engine since the last call.
+    ///
+    /// In-process engines return an empty vec; transports running a reader
+    /// thread (out-of-process helper) return what arrived. The UI applies
+    /// them with `WebView::pump_events`.
+    fn drain_events(&self) -> Vec<EngineEvent> {
+        Vec::new()
+    }
+
+    /// Synchronous JavaScript evaluation shortcut.
+    ///
+    /// Engines answering inline (tests) return `Some`; transports return
+    /// `None` so the view correlates the async `JsResult` event instead.
+    fn eval_sync(&self, _script: &str) -> Option<serde_json::Value> {
+        None
     }
 }
 
@@ -236,6 +334,10 @@ impl WebEngine for MockEngine {
 
     fn latest_frame(&self) -> Option<Arc<SharedFrame>> {
         Some(self.frame.read().expect("mock frame lock").clone())
+    }
+
+    fn eval_sync(&self, _script: &str) -> Option<serde_json::Value> {
+        Some(serde_json::Value::Null)
     }
 }
 

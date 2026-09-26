@@ -37,6 +37,10 @@ gtk-backend = ["dep:gtk", "dep:gio", "dep:glib", "dep:webkit6", "dep:webkit6-sys
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "tontoo-webengine"
+path = "src/bin/tontoo-webengine.rs"
+
 [[example]]
 name = "browser"
 path = "examples/browser.rs"
@@ -50,3 +54,9 @@ required-features = ["gtk-backend"]
 [[example]]
 name = "vello_webview"
 path = "examples/vello_webview.rs"
+required-features = ["vello"]
+
+[[example]]
+name = "vello_browser"
+path = "examples/vello_browser.rs"
+required-features = ["vello"]

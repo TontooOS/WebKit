@@ -56,6 +56,21 @@ impl WebViewContent {
         })
     }
 
+    /// Create the wrapper on the spawned helper when available,
+    /// otherwise on the test engine. Never fails.
+    pub fn with_spawned_fallback() -> Self {
+        let inner = WebView::with_spawned_engine(WebKitConfiguration::new())
+            .expect("mock engine always builds");
+        Self {
+            inner,
+            x: 0.0,
+            y: 0.0,
+            placed_w: 0.0,
+            placed_h: 0.0,
+            scale: 1.0,
+        }
+    }
+
     /// The wrapped [`WebView`].
     pub fn web_view(&self) -> &WebView {
         &self.inner

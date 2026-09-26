@@ -59,6 +59,8 @@ pub mod engine;
 pub mod error;
 #[cfg(feature = "gtk-backend")]
 pub mod ffi;
+#[cfg(feature = "vello")]
+pub mod ffi_vello;
 pub mod geolocation;
 #[cfg(feature = "gtk-backend")]
 pub mod json;
@@ -68,6 +70,8 @@ pub mod script;
 pub mod settings;
 #[cfg(feature = "vello")]
 pub mod tontooui_view;
+pub mod transport;
+pub use transport::{ProcessEngine, find_helper};
 #[cfg(feature = "gtk-backend")]
 pub mod uikit_view;
 #[cfg(feature = "vello")]

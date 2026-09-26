@@ -8,18 +8,27 @@
 //! [`crate::engine::SharedFrame`] for texture blitting into TontooUI
 //! (see `crate::tontooui_view::WebViewContent`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::time::{Duration, Instant};
 
 use crate::config::{DataStoreKind, WebKitConfiguration};
-use crate::delegate::{DefaultWebViewDelegate, WebViewDelegate};
+use crate::cookie::Cookie;
+use crate::delegate::{
+    DefaultWebViewDelegate, PermissionDecision, ScriptDialogRef, WebViewDelegate,
+};
 use crate::download::{DefaultDownloadDelegate, DownloadDelegate, WebDownload};
 use crate::engine::{EngineCommand, MockEngine, SharedFrame, WebEngine};
 use crate::error::WebKitError;
 use crate::navigation::{DefaultWebNavigationDelegate, WebNavigationDelegate};
 use crate::script::ScriptMessageHandler;
 use crate::settings::WebSettings;
+
+/// How long [`WebView::evaluate_javascript`] waits for the engine answer.
+pub const JS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A web view without a toolkit widget. Frames are pulled with
 /// [`WebView::poll_frame`] and drawn as a Vello texture.
@@ -36,6 +45,9 @@ pub struct WebView {
     can_back: RefCell<bool>,
     can_forward: RefCell<bool>,
     zoom: RefCell<f64>,
+    next_js_id: Cell<u64>,
+    pending_js: RefCell<HashMap<u64, SyncSender<serde_json::Value>>>,
+    pending_cookies: RefCell<HashMap<u64, SyncSender<Vec<Cookie>>>>,
 }
 
 impl WebView {
@@ -69,6 +81,9 @@ impl WebView {
             can_back: RefCell::new(false),
             can_forward: RefCell::new(false),
             zoom: RefCell::new(1.0),
+            next_js_id: Cell::new(1),
+            pending_js: RefCell::new(HashMap::new()),
+            pending_cookies: RefCell::new(HashMap::new()),
         };
         if let Some(url) = view.config.start_url.clone() {
             view.load_url(&url)?;
@@ -79,6 +94,18 @@ impl WebView {
     /// Fluent builder entry point.
     pub fn builder() -> WebViewBuilder {
         WebViewBuilder::new()
+    }
+
+    /// Create a web view, spawning the `tontoo-webengine` helper when it
+    /// is available and falling back to the test engine otherwise.
+    pub fn with_spawned_engine(config: WebKitConfiguration) -> Result<Self, WebKitError> {
+        match crate::transport::ProcessEngine::spawn() {
+            Ok(engine) => Self::with_engine(config, Arc::new(engine)),
+            Err(e) => {
+                eprintln!("tontoo-webengine unavailable ({e}); using test engine");
+                Self::new(config)
+            }
+        }
     }
 
     /// The engine driving this view.
@@ -237,6 +264,10 @@ impl WebView {
 
     /// Apply one engine event (called by the IPC pump in the reader
     /// thread or the run loop; unit tests call it directly).
+    ///
+    /// Returns the number of applied events for [`WebView::pump_events`].
+    /// Dialog, permission and download events are answered through the
+    /// delegates immediately.
     pub fn apply_event(&self, event: crate::engine::EngineEvent) {
         use crate::engine::EngineEvent as E;
         match event {
@@ -293,20 +324,200 @@ impl WebView {
             E::ReadyToShow => {
                 self.delegate.borrow_mut().ready_to_show();
             }
-            E::FrameReady { .. } | E::JsResult { .. } => {}
+            E::FrameReady { .. } => {}
+            E::JsResult { id, result } => {
+                if let Some(tx) = self.pending_js.borrow_mut().remove(&id) {
+                    let _ = tx.try_send(result);
+                }
+            }
+            E::ScriptDialog {
+                id,
+                kind,
+                message,
+                prompt_default,
+            } => {
+                let dialog = ScriptDialogRef::new(kind, message, prompt_default);
+                let handled = self.delegate.borrow_mut().script_dialog(&dialog);
+                let (confirmed, text) = dialog.take_answer();
+                self.engine.send(EngineCommand::DialogAnswer {
+                    id,
+                    confirmed: confirmed.unwrap_or(handled),
+                    text,
+                });
+            }
+            E::PermissionRequest { id, kind } => {
+                let granted = matches!(
+                    self.delegate.borrow_mut().permission_request(kind),
+                    PermissionDecision::Grant
+                );
+                self.engine.send(EngineCommand::PermissionAnswer {
+                    id,
+                    granted,
+                });
+            }
+            E::DownloadStarted {
+                id,
+                uri,
+                suggested_filename,
+            } => {
+                let download = WebDownload {
+                    uri,
+                    destination: None,
+                    progress: 0.0,
+                    received_bytes: 0,
+                };
+                let path = self
+                    .downloads
+                    .borrow_mut()
+                    .decide_destination(&download, &suggested_filename);
+                self.engine.send(EngineCommand::DownloadDestination {
+                    id,
+                    path,
+                });
+            }
+            E::DownloadProgress {
+                id,
+                progress,
+                received_bytes,
+            } => {
+                let download = WebDownload {
+                    uri: None,
+                    destination: None,
+                    progress,
+                    received_bytes,
+                };
+                self.downloads
+                    .borrow_mut()
+                    .download_progress(&download);
+                let _ = id;
+            }
+            E::DownloadFinished { id } => {
+                let download = WebDownload {
+                    uri: None,
+                    destination: None,
+                    progress: 1.0,
+                    received_bytes: 0,
+                };
+                self.downloads.borrow_mut().download_finished(&download);
+                let _ = id;
+            }
+            E::DownloadFailed { id, error } => {
+                let download = WebDownload {
+                    uri: None,
+                    destination: None,
+                    progress: 0.0,
+                    received_bytes: 0,
+                };
+                self.downloads
+                    .borrow_mut()
+                    .download_failed(&download, &error);
+                let _ = id;
+            }
+            E::Cookies { id, cookies } => {
+                if let Some(tx) = self.pending_cookies.borrow_mut().remove(&id) {
+                    let _ = tx.try_send(cookies);
+                }
+            }
         }
     }
 
-    /// Run JavaScript in the page.
+    /// Drain queued engine events and apply them. Call once per UI frame
+    /// (before reading title/progress) when the engine runs
+    /// out-of-process. Returns the number of applied events.
+    pub fn pump_events(&self) -> usize {
+        let events = self.engine.drain_events();
+        let n = events.len();
+        for event in events {
+            self.apply_event(event);
+        }
+        n
+    }
+
+    /// Run JavaScript in the page and wait for the JSON result.
     ///
-    /// The out-of-process engine answers asynchronously; this stub resolves
-    /// immediately with `null` until the JS-result pump (`JsResult` events
-    /// correlated by id) lands with the WPE helper.
+    /// Blocks the calling thread up to [`JS_TIMEOUT`] while pumping engine
+    /// events. In-process test engines answer inline; the out-of-process
+    /// helper answers through the correlated `JsResult` event. Returns
+    /// `Err(WebKitError::Javascript)` on timeout.
     pub fn evaluate_javascript(
         &self,
-        _script: &str,
+        script: &str,
     ) -> Result<serde_json::Value, WebKitError> {
-        Ok(serde_json::Value::Null)
+        if let Some(value) = self.engine.eval_sync(script) {
+            return Ok(value);
+        }
+        let id = self.next_js_id.get();
+        self.next_js_id.set(id.wrapping_add(1).max(1));
+        let (tx, rx) = sync_channel::<serde_json::Value>(1);
+        self.pending_js.borrow_mut().insert(id, tx);
+        self.engine.send(EngineCommand::EvaluateJs {
+            id,
+            script: script.to_string(),
+        });
+        let deadline = Instant::now() + JS_TIMEOUT;
+        loop {
+            self.pump_events();
+            match rx.try_recv() {
+                Ok(value) => return Ok(value),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.pending_js.borrow_mut().remove(&id);
+                    return Err(WebKitError::Javascript("engine hung up".into()));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= deadline {
+                self.pending_js.borrow_mut().remove(&id);
+                return Err(WebKitError::Javascript("timed out waiting for result".into()));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// List cookies of the engine store. Blocks up to [`JS_TIMEOUT`].
+    pub fn list_cookies(&self) -> Result<Vec<Cookie>, WebKitError> {
+        let id = self.next_js_id.get();
+        self.next_js_id.set(id.wrapping_add(1).max(1));
+        let (tx, rx) = sync_channel::<Vec<Cookie>>(1);
+        self.pending_cookies.borrow_mut().insert(id, tx);
+        self.engine.send(EngineCommand::ListCookies { id });
+        let deadline = Instant::now() + JS_TIMEOUT;
+        loop {
+            self.pump_events();
+            match rx.try_recv() {
+                Ok(cookies) => return Ok(cookies),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.pending_cookies.borrow_mut().remove(&id);
+                    return Err(WebKitError::Engine("engine hung up".into()));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= deadline {
+                self.pending_cookies.borrow_mut().remove(&id);
+                return Err(WebKitError::Engine("timed out waiting for cookies".into()));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Add or update a cookie in the engine store.
+    pub fn add_cookie(&self, cookie: &Cookie) {
+        self.engine.send(EngineCommand::AddCookie {
+            cookie: cookie.clone(),
+        });
+    }
+
+    /// Delete the cookie matching domain, path and name.
+    pub fn delete_cookie(&self, domain: &str, path: &str, name: &str) {
+        self.engine.send(EngineCommand::DeleteCookie {
+            domain: domain.to_string(),
+            path: path.to_string(),
+            name: name.to_string(),
+        });
+    }
+
+    /// Clear stored website data in the engine.
+    pub fn clear_data(&self, cookies: bool, cache: bool) {
+        self.engine.send(EngineCommand::ClearData { cookies, cache });
     }
 
     /// The configured settings (serializable; forwarded to the engine
@@ -387,6 +598,8 @@ impl Default for WebViewBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::EngineEvent;
+    use std::sync::Mutex;
 
     #[test]
     fn start_url_validation_survives() {
@@ -416,5 +629,92 @@ mod tests {
         view.apply_event(EngineEvent::LoadFinished(None));
         assert!(flag.get());
         assert!(!view.is_loading());
+    }
+
+    /// Test engine answering JS asynchronously through the event queue.
+    struct PumpEngine {
+        frame: Arc<SharedFrame>,
+        pending: Mutex<Vec<EngineEvent>>,
+    }
+
+    impl WebEngine for PumpEngine {
+        fn send(&self, command: EngineCommand) {
+            if let EngineCommand::EvaluateJs { id, script } = command {
+                let result = serde_json::Value::String(format!("echo:{script}"));
+                self.pending
+                    .lock()
+                    .unwrap()
+                    .push(EngineEvent::JsResult { id, result });
+            }
+        }
+
+        fn latest_frame(&self) -> Option<Arc<SharedFrame>> {
+            Some(self.frame.clone())
+        }
+
+        fn drain_events(&self) -> Vec<EngineEvent> {
+            std::mem::take(&mut *self.pending.lock().unwrap())
+        }
+    }
+
+    #[test]
+    fn js_result_correlation_works() {
+        let engine = Arc::new(PumpEngine {
+            frame: Arc::new(SharedFrame::checkerboard(0, 32, 32)),
+            pending: Mutex::new(Vec::new()),
+        });
+        let view = WebView::with_engine(WebKitConfiguration::new(), engine).unwrap();
+        let result = view.evaluate_javascript("1+1").unwrap();
+        assert_eq!(result, serde_json::Value::String("echo:1+1".into()));
+    }
+
+    #[test]
+    fn dialog_answer_reaches_engine() {
+        use crate::delegate::ScriptDialogKind;
+
+        struct Deny;
+        impl crate::delegate::WebViewDelegate for Deny {}
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        struct Spy {
+            seen: Arc<Mutex<Vec<EngineCommand>>>,
+        }
+        impl WebEngine for Spy {
+            fn send(&self, command: EngineCommand) {
+                // Only record answers, ignore the rest.
+                if matches!(
+                    command,
+                    EngineCommand::DialogAnswer { .. } | EngineCommand::PermissionAnswer { .. }
+                ) {
+                    self.seen.lock().unwrap().push(command);
+                }
+            }
+            fn latest_frame(&self) -> Option<Arc<SharedFrame>> {
+                None
+            }
+        }
+        let engine = Arc::new(Spy { seen: seen.clone() });
+        let view = WebView::with_engine(WebKitConfiguration::new(), engine).unwrap();
+        view.set_delegate(Box::new(Deny));
+        view.apply_event(EngineEvent::ScriptDialog {
+            id: 7,
+            kind: ScriptDialogKind::Confirm,
+            message: "sure?".into(),
+            prompt_default: None,
+        });
+        view.apply_event(EngineEvent::PermissionRequest {
+            id: 8,
+            kind: crate::delegate::PermissionKind::Geolocation,
+        });
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(matches!(
+            seen[0],
+            EngineCommand::DialogAnswer { id: 7, .. }
+        ));
+        assert!(matches!(
+            seen[1],
+            EngineCommand::PermissionAnswer { id: 8, granted: false }
+        ));
     }
 }

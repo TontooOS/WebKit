@@ -1,12 +1,12 @@
-//! Minimal GTK4-only TontooWebKit example (no UIKit).
+//! Minimal GTK4-only TontooWebKit example (legacy backend).
 //!
-//! Shows the smallest possible embedding: create a [`webkit::WebView`], pack
-//! its widget into a window and navigate to a start URL.
+//! Shows the smallest possible embedding: create a [`webkit::GtkWebView`],
+//! pack its widget into a window and navigate to a start URL.
 //!
-//! Run with: `cargo run --example minimal`
+//! Run with: `cargo run --example minimal --features gtk-backend`
 
 use gtk::prelude::*;
-use webkit::{WebKitConfiguration, WebView};
+use webkit::{GtkWebView, WebKitConfiguration};
 
 fn main() -> glib::ExitCode {
     let app = gtk::Application::builder()
@@ -14,7 +14,7 @@ fn main() -> glib::ExitCode {
         .build();
 
     app.connect_activate(|app| {
-        let web_view = WebView::new(
+        let web_view = GtkWebView::new(
             WebKitConfiguration::new().start_url("https://example.com"),
         )
         .expect("failed to create web view");

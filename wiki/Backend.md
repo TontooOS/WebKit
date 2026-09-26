@@ -9,8 +9,9 @@ delegates) stays stable while the engine behind it is exchangeable.
 ```
 WebView (src/view.rs, no toolkit dependency)
   |-- WebEngine trait (src/engine.rs)
-  |     |-- MockEngine ......... checkerboard, tests, stand-in
-  |     +-- WpeEngine (planned)  WPE WebKit out-of-process
+  |     |-- MockEngine ......... checkerboard, unit tests
+  |     |-- ProcessEngine ...... spawns tontoo-webengine (src/transport.rs)
+  |     +-- WpeEngine (planned)  WPE WebKit inside the helper
   |-- SharedFrame { seq, width, height, rgba }
   +-- EngineCommand / EngineEvent (serializable IPC vocabulary)
 ```
@@ -19,7 +20,8 @@ The view owns no widget. It sends [`EngineCommand`] values to the engine
 and reads the latest [`SharedFrame`] with `poll_frame`. TontooUI blits the
 frame as a Vello texture (see `tontooui_view::WebViewContent`), so rounded
 corners and LiquidGlass keep working. Input flows the other way: mouse,
-wheel and typed text become engine commands.
+wheel and typed text become engine commands. Queued engine events are
+applied with `pump_events`, which every UI calls once per frame.
 
 ## Cargo Features
 
@@ -76,10 +78,25 @@ pub struct MockEngine { /* ... */ }
 ```
 
 - Serves a checkerboard frame, records the last URL and answers every
-  JavaScript evaluation with `null`.
+  JavaScript evaluation with `null` inline (`eval_sync`).
 - `resize_frame(width, height)` re-renders the placeholder at a new size.
 - `last_url() -> Option<String>` returns the last loaded URL.
-- Used by unit tests and as a stand-in until the WPE helper lands.
+- Used by unit tests; the helper binary is the integration stand-in.
+
+### `ProcessEngine`
+
+```rust
+pub struct ProcessEngine { /* ... */ }
+pub fn find_helper() -> Result<PathBuf, WebKitError>
+```
+
+- Spawns the `tontoo-webengine` helper (see below) and implements
+  `WebEngine` over pipes plus a frame file.
+- Lookup order: `TONTOO_WEBENGINE_BIN`, next to the current executable
+  (including cargo `deps/`), then `PATH`.
+- `WebView::with_spawned_engine(config)` tries the helper and falls back
+  to `MockEngine` with a stderr note, so apps and demos never fail to
+  start when the helper is missing.
 
 ### `EngineCommand` / `EngineEvent`
 
@@ -92,14 +109,39 @@ size only; pixels travel via shared memory), state (`Title`, `Url`,
 `Progress`, `LoadStarted`, `LoadFinished`, `LoadFailed`,
 `ScriptMessage`, `JsResult`) and readiness (`ReadyToShow`).
 
-`WebView::apply_event` feeds one event into the delegates; the IPC pump
-of the WPE helper will call it, unit tests call it directly.
+`WebView::apply_event` feeds one event into the delegates; the transport
+reader thread queues them and `WebView::pump_events` applies them on the
+UI thread. Dialog answers come from `ScriptDialogRef::set_confirmed` /
+`set_prompt_text` (recorded, then sent as `DialogAnswer`); permission
+answers come from the `WebViewDelegate::permission_request` return value;
+download destinations come from `DownloadDelegate::decide_destination`.
+JavaScript and cookie listings correlate by id (`JsResult`, `Cookies`
+events); `evaluate_javascript` and `list_cookies` block up to 5 seconds
+(`JS_TIMEOUT`) while pumping.
 
-## WPE Helper (Planned)
+## Helper Protocol (`tontoo-webengine`)
 
-The production engine is WPE WebKit (same Apple WebKit engine as the
-legacy GTK backend, but Wayland-native without GTK) in the
-`tontoo-webengine` helper process:
+The helper (`src/bin/tontoo-webengine.rs`) is a plain child process:
+
+- Args: `--slot-dir <dir>` (required), `--ping` (render one frame and
+  exit, for headless self tests).
+- stdin: `C {<EngineCommand JSON>}` lines. stdout: `E {<EngineEvent
+  JSON>}` lines. stderr is inherited for logs.
+- Frames: raw BGRA bytes in `<slot-dir>/frame.bgra`, announced by
+  `FrameReady { seq, width, height }`. The UI re-reads the file only on a
+  new event, so pixels never cross the pipes.
+- The current renderer is an animated software placeholder (band moves on
+  input/resize; top strip echoes the URL length) with a mock cookie jar.
+- Headless self test: `tontoo-webengine --slot-dir <dir> --ping` prints
+  `FrameReady` and writes exactly `800 * 600 * 4` bytes.
+
+## WPE Slot (Planned)
+
+The production renderer is WPE WebKit (same Apple WebKit engine as the
+legacy GTK backend, but Wayland-native without GTK) inside the helper.
+Swap `render()` for the `wpe_view_backend_exportable_fdo` readback and
+everything upstream (view, TontooUI embedding, C ABI) keeps working
+unchanged:
 
 - Renders offscreen through `wpe_view_backend_exportable_fdo` (EGL) and
   exports BGRA frames via `memfd` shared memory plus damage rects.
@@ -124,15 +166,23 @@ let frame = web_view.poll_frame().expect("engine serves frames");
 assert_eq!(frame.rgba.len(), 800 * 600 * 4);
 ```
 
-Run the TontooUI demo (mock frames in a real window):
+Run the TontooUI demos (helper frames in a real window; falls back to
+the test engine when the helper is missing):
 
 ```bash
 cargo run --example vello_webview
+cargo run --example vello_browser
+```
+
+Headless round-trip test (needs the built helper binary):
+
+```bash
+TONTOO_WEBENGINE_BIN=../../target/debug/tontoo-webengine cargo test --test process
 ```
 
 ## Cross References
 
 - [WebView.md](WebView.md) – the backend-neutral view widget and its methods
 - [UIKit.md](UIKit.md) – legacy GTK embedding (deprecated shim)
-- [Ffi.md](Ffi.md) – C API, only with the `gtk-backend` feature
+- [Ffi.md](Ffi.md) – C APIs (`webkit.h` for GTK, `webkit_vello.h` for Vello)
 - [Settings.md](Settings.md) – settings are serializable for the engine helper
