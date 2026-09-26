@@ -98,6 +98,10 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
 
 ## Changelog
 
+- 2026-09-26: Helper discovery fix -- `find_helper` walks up from the
+  executable (cargo `examples/`/`deps/` layouts), so the demos find the
+  helper after one `cargo build`. `cargo run --example` alone does not
+  build the helper binary.
 - 2026-09-26: Full Vello loop -- `tontoo-webengine` helper (line
   protocol, frame files, `--ping` self test), `ProcessEngine` transport
   with helper discovery and mock fallback, JS/cookie id correlation with

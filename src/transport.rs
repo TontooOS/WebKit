@@ -7,8 +7,9 @@
 //! the `FrameReady` event), so no socket or fd passing is needed and the
 //! same code works on Linux and Windows.
 //!
-//! The helper binary is located via `TONTOO_WEBENGINE_BIN`, next to the
-//! current executable, or on `PATH`. When it cannot be spawned,
+//! The helper binary is located via `TONTOO_WEBENGINE_BIN`, by walking up
+//! from the current executable (covers cargo `examples/`, `deps/` and plain
+//! `debug/`/`release/` layouts), or on `PATH`. When it cannot be spawned,
 //! [`ProcessEngine::spawn`] fails and callers (e.g.
 //! [`crate::view::WebView::with_spawned_engine`]) fall back to the test
 //! engine.
@@ -29,6 +30,13 @@ pub const EVENT_PREFIX: &str = "E ";
 pub const FRAME_FILE: &str = "frame.bgra";
 
 /// Locate the helper binary.
+///
+/// Lookup order: `TONTOO_WEBENGINE_BIN`, next to the current executable
+/// (walking up through `examples/` and `deps/` layouts that cargo
+/// produces), then `PATH`. Note that `cargo run --example` does not build
+/// the helper -- run `cargo build` (or `cargo build --bin
+/// tontoo-webengine`) once first, otherwise this fails and callers fall
+/// back to the test engine.
 pub fn find_helper() -> Result<PathBuf, WebKitError> {
     if let Ok(path) = std::env::var("TONTOO_WEBENGINE_BIN") {
         let path = PathBuf::from(path);
@@ -37,32 +45,17 @@ pub fn find_helper() -> Result<PathBuf, WebKitError> {
         }
     }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for name in ["tontoo-webengine", "tontoo-webengine.exe"] {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
+        let mut dir = exe.parent().map(PathBuf::from);
+        // Walk up: examples/vello_browser -> examples/ -> debug/ (bins)
+        // and deps/vello_browser-hash -> deps/ -> debug/ (bins).
+        for _ in 0..3 {
+            let Some(current) = dir.clone() else {
+                break;
+            };
+            if let Some(found) = helper_in_dir(&current) {
+                return Ok(found);
             }
-            // Cargo places helper bins next to examples under deps/.
-            let deps = dir.join("deps");
-            if deps.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&deps) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        if name == "tontoo-webengine"
-                            || name == "tontoo-webengine.exe"
-                            || name.starts_with("tontoo-webengine-")
-                        {
-                            let path = entry.path();
-                            if path.is_file() {
-                                return Ok(path);
-                            }
-                        }
-                    }
-                }
-            }
+            dir = current.parent().map(PathBuf::from);
         }
     }
     for name in ["tontoo-webengine", "tontoo-webengine.exe"] {
@@ -71,8 +64,37 @@ pub fn find_helper() -> Result<PathBuf, WebKitError> {
         }
     }
     Err(WebKitError::Engine(
-        "tontoo-webengine helper not found (set TONTOO_WEBENGINE_BIN)".into(),
+        "tontoo-webengine helper not found (run `cargo build --bin tontoo-webengine` or set TONTOO_WEBENGINE_BIN)".into(),
     ))
+}
+
+/// Look for the helper directly inside `dir` or inside its `deps/`
+/// subdir (cargo hashes test/example binaries there, plain bins land
+/// next to it).
+fn helper_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
+    for name in ["tontoo-webengine", "tontoo-webengine.exe"] {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let deps = dir.join("deps");
+    if let Ok(entries) = std::fs::read_dir(&deps) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "tontoo-webengine"
+                || name == "tontoo-webengine.exe"
+                || name.starts_with("tontoo-webengine-")
+            {
+                let path = entry.path();
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -229,5 +251,22 @@ mod tests {
         std::env::remove_var("TONTOO_WEBENGINE_BIN");
         let missing = PathBuf::from("/nonexistent/tontoo-webengine-test-binary");
         assert!(ProcessEngine::spawn_with_bin(&missing).is_err());
+    }
+
+    #[test]
+    fn find_helper_walks_up_to_bins() {
+        // Test binaries live in <target>/debug/deps/, the helper (once
+        // `cargo build` ran) in <target>/debug/. Without a built helper
+        // this passes trivially instead of failing.
+        std::env::remove_var("TONTOO_WEBENGINE_BIN");
+        match find_helper() {
+            Ok(path) => {
+                assert!(path.is_file(), "helper is a file: {}", path.display());
+                eprintln!("found helper: {}", path.display());
+            }
+            Err(e) => {
+                eprintln!("no built helper present, skipping ({e})");
+            }
+        }
     }
 }

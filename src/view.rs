@@ -98,6 +98,10 @@ impl WebView {
 
     /// Create a web view, spawning the `tontoo-webengine` helper when it
     /// is available and falling back to the test engine otherwise.
+    ///
+    /// The helper is found via `find_helper`; `cargo run --example` does
+    /// not build it, so run `cargo build` (or `cargo build --bin
+    /// tontoo-webengine`) once first.
     pub fn with_spawned_engine(config: WebKitConfiguration) -> Result<Self, WebKitError> {
         match crate::transport::ProcessEngine::spawn() {
             Ok(engine) => Self::with_engine(config, Arc::new(engine)),

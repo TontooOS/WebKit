@@ -92,11 +92,13 @@ pub fn find_helper() -> Result<PathBuf, WebKitError>
 
 - Spawns the `tontoo-webengine` helper (see below) and implements
   `WebEngine` over pipes plus a frame file.
-- Lookup order: `TONTOO_WEBENGINE_BIN`, next to the current executable
-  (including cargo `deps/`), then `PATH`.
-- `WebView::with_spawned_engine(config)` tries the helper and falls back
-  to `MockEngine` with a stderr note, so apps and demos never fail to
-  start when the helper is missing.
+- Lookup order: `TONTOO_WEBENGINE_BIN`, then walking up from the current
+  executable (covers cargo `examples/`, `deps/` and plain `debug/` or
+  `release/` layouts), then `PATH`.
+- `cargo run --example` does not build the helper, so run `cargo build`
+  (or `cargo build --bin tontoo-webengine`) once first. Without a helper
+  binary `WebView::with_spawned_engine(config)` falls back to
+  `MockEngine` with a stderr note, so apps and demos still start.
 
 ### `EngineCommand` / `EngineEvent`
 
