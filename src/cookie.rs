@@ -1,15 +1,18 @@
 //! Cookie management, the equivalent of `WKHTTPCookieStore` in Apple
 //! WebKit.
 //!
-//! The [`CookieManager`] controls the accept policy (for example blocking
-//! third-party cookies), reads and writes individual cookies and selects
-//! the persistent cookie storage format. Obtain it from a view with
-//! [`crate::WebView::cookie_manager`].
+//! [`Cookie`], [`CookieAcceptPolicy`] and [`CookieStorage`] are
+//! backend-neutral. [`CookieManager`] needs the `gtk-backend` feature;
+//! the out-of-process engine manages cookies in its helper process.
 
+#[cfg(feature = "gtk-backend")]
 use webkit6 as wk;
+#[cfg(feature = "gtk-backend")]
 use webkit6::prelude::*;
 
+#[cfg(feature = "gtk-backend")]
 use crate::error::WebKitError;
+#[cfg(feature = "gtk-backend")]
 use crate::web_view::WebView;
 
 /// Which cookies the engine accepts.
@@ -24,6 +27,7 @@ pub enum CookieAcceptPolicy {
 }
 
 impl CookieAcceptPolicy {
+    #[cfg(feature = "gtk-backend")]
     fn to_engine(self) -> wk::CookieAcceptPolicy {
         match self {
             CookieAcceptPolicy::Always => wk::CookieAcceptPolicy::Always,
@@ -32,6 +36,7 @@ impl CookieAcceptPolicy {
         }
     }
 
+    #[cfg(feature = "gtk-backend")]
     fn from_engine(policy: wk::CookieAcceptPolicy) -> Self {
         match policy {
             wk::CookieAcceptPolicy::Never => CookieAcceptPolicy::Never,
@@ -51,6 +56,7 @@ pub enum CookieStorage {
 }
 
 impl CookieStorage {
+    #[cfg(feature = "gtk-backend")]
     fn to_engine(self) -> wk::CookiePersistentStorage {
         match self {
             CookieStorage::Text => wk::CookiePersistentStorage::Text,
@@ -108,11 +114,15 @@ impl Cookie {
     }
 }
 
-/// The cookie store backing a web view's network session.
+/// The cookie store backing a GTK web view's network session.
+///
+/// Only available with the `gtk-backend` feature.
+#[cfg(feature = "gtk-backend")]
 pub struct CookieManager {
     inner: wk::CookieManager,
 }
 
+#[cfg(feature = "gtk-backend")]
 impl CookieManager {
     /// Take the cookie manager of a web view's network session.
     ///
@@ -186,12 +196,14 @@ impl CookieManager {
     }
 }
 
+#[cfg(feature = "gtk-backend")]
 fn block<T>(future: impl std::future::Future<Output = Result<T, glib::Error>>) -> Result<T, WebKitError> {
     glib::MainContext::default()
         .block_on(future)
         .map_err(|e| WebKitError::Engine(e.to_string()))
 }
 
+#[cfg(feature = "gtk-backend")]
 fn cookie_from_soup(c: &mut soup::Cookie) -> Cookie {
     Cookie {
         name: c.name().unwrap_or_default().to_string(),

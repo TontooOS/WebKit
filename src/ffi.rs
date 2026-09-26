@@ -1,9 +1,15 @@
-//! C FFI exposed from the `cdylib`. The matching header lives at
-//! `Headers/webkit.h`.
+//! C FFI for the GTK backend (feature `gtk-backend`).
+//!
+//! The matching header lives at `Headers/webkit.h`.
 //!
 //! The FFI layer lets C / C++ apps (and other languages that can load a
 //! shared library) embed a TontooWebKit web view. Configuration is passed
 //! as a JSON string; state changes are reported through a callback vtable.
+//!
+//! The Vello path has no stable C ABI yet: frame polling
+//! (`poll_frame`-style pixel handoff) lands with the WPE helper process.
+
+#![cfg(feature = "gtk-backend")]
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString};

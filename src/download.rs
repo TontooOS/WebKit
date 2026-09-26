@@ -1,19 +1,20 @@
 //! Download handling, the equivalent of `WKDownloadDelegate` in Apple
 //! WebKit.
 //!
-//! Every download started by a [`crate::WebView`] (clicking a download
-//! link, or an explicit `download_uri` call) is reported to the view's
-//! [`DownloadDelegate`]. The delegate decides where the file is saved;
-//! returning `None` from
-//! [`DownloadDelegate::decide_destination`] cancels the download.
+//! [`DownloadDelegate`] is backend-neutral. [`WebDownload`] wraps the GTK
+//! engine download with the `gtk-backend` feature and carries plain data
+//! otherwise.
 
+#[cfg(feature = "gtk-backend")]
 use webkit6 as wk;
 
 /// A single in-progress download.
+#[cfg(feature = "gtk-backend")]
 pub struct WebDownload {
     inner: wk::Download,
 }
 
+#[cfg(feature = "gtk-backend")]
 impl WebDownload {
     pub(crate) fn from_engine(inner: wk::Download) -> Self {
         Self { inner }
@@ -46,6 +47,49 @@ impl WebDownload {
     pub fn cancel(&self) {
         self.inner.cancel();
     }
+}
+
+/// A single in-progress download (backend-neutral descriptor).
+///
+/// Used by the out-of-process engine; the GTK backend uses its own
+/// engine-backed variant instead.
+#[cfg(not(feature = "gtk-backend"))]
+#[derive(Debug, Clone)]
+pub struct WebDownload {
+    /// The URI being downloaded.
+    pub uri: Option<String>,
+    /// The destination path chosen by the delegate, if already decided.
+    pub destination: Option<String>,
+    /// Estimated progress between 0.0 and 1.0.
+    pub progress: f64,
+    /// Bytes received so far.
+    pub received_bytes: u64,
+}
+
+#[cfg(not(feature = "gtk-backend"))]
+impl WebDownload {
+    /// The URI being downloaded.
+    pub fn uri(&self) -> Option<String> {
+        self.uri.clone()
+    }
+
+    /// The destination path chosen by the delegate, if already decided.
+    pub fn destination(&self) -> Option<String> {
+        self.destination.clone()
+    }
+
+    /// Estimated progress between 0.0 and 1.0.
+    pub fn estimated_progress(&self) -> f64 {
+        self.progress
+    }
+
+    /// Bytes received so far.
+    pub fn received_bytes(&self) -> u64 {
+        self.received_bytes
+    }
+
+    /// Cancel the download.
+    pub fn cancel(&self) {}
 }
 
 /// Delegate for downloads started by a [`crate::WebView`].

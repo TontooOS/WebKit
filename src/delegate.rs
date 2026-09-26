@@ -1,6 +1,7 @@
 //! View-level state callbacks, the equivalent of combining
 //! `WKUIDelegate` and the `WKWebView` KVO notifications in Apple WebKit.
 
+#[cfg(feature = "gtk-backend")]
 use webkit6 as wk;
 
 /// Trait for observing web view state changes.
@@ -73,10 +74,12 @@ pub enum ScriptDialogKind {
 
 /// Reference to an engine script dialog passed to
 /// [`WebViewDelegate::script_dialog`].
+#[cfg(feature = "gtk-backend")]
 pub struct ScriptDialogRef<'a> {
     inner: &'a wk::ScriptDialog,
 }
 
+#[cfg(feature = "gtk-backend")]
 impl<'a> ScriptDialogRef<'a> {
     pub(crate) fn from_engine(inner: &'a wk::ScriptDialog) -> Self {
         Self { inner }
@@ -113,6 +116,55 @@ impl<'a> ScriptDialogRef<'a> {
     pub fn set_confirmed(&self, confirmed: bool) {
         self.inner.confirm_set_confirmed(confirmed);
     }
+}
+
+/// Backend-neutral script dialog passed to
+/// [`WebViewDelegate::script_dialog`] when the GTK backend is disabled.
+///
+/// Carries the dialog kind, message and prompt default; answers are sent
+/// back to the out-of-process engine by the view.
+#[cfg(not(feature = "gtk-backend"))]
+pub struct ScriptDialogRef {
+    kind: ScriptDialogKind,
+    message: String,
+    prompt_default: Option<String>,
+}
+
+#[cfg(not(feature = "gtk-backend"))]
+impl ScriptDialogRef {
+    /// Create a dialog description (used by the engine IPC layer).
+    pub fn new(
+        kind: ScriptDialogKind,
+        message: impl Into<String>,
+        prompt_default: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            prompt_default,
+        }
+    }
+
+    /// Which kind of dialog was requested.
+    pub fn kind(&self) -> ScriptDialogKind {
+        self.kind
+    }
+
+    /// The dialog message text.
+    pub fn message(&self) -> String {
+        self.message.clone()
+    }
+
+    /// The default text of a `prompt` dialog, if any.
+    pub fn prompt_default_text(&self) -> Option<String> {
+        self.prompt_default.clone()
+    }
+
+    /// Answer a `prompt` dialog with text.
+    pub fn set_prompt_text(&self, _text: &str) {}
+
+    /// Answer a `confirm` or before-unload dialog.
+    pub fn set_confirmed(&self, _confirmed: bool) {}
 }
 
 /// What a page can ask permission for.

@@ -6,11 +6,19 @@
 //! handlers and the website data store, plus navigation and lifecycle
 //! delegates.
 //!
-//! The rendering backend is WebKitGTK (the Apple WebKit engine ported to
-//! GTK4), so TontooOS apps get Safari-class rendering without any Chromium
-//! code.
+//! ## Backends
 //!
-//! ## Quick Start
+//! * Default (`vello` feature): backend-neutral [`view::WebView`] driving a
+//!   [`engine::WebEngine`] (WPE WebKit out-of-process once
+//!   `tontoo-webengine` lands, [`engine::MockEngine`] until then). Frames
+//!   are blitted as Vello textures via
+//!   [`tontooui_view::WebViewContent`], so rounded corners and LiquidGlass
+//!   keep working in TontooUI windows.
+//! * Legacy (`gtk-backend` feature): WebKitGTK (the Apple WebKit engine on
+//!   GTK4) behind a `gtk::Widget`. Requires a GTK4 event loop and cannot be
+//!   embedded in TontooUI windows.
+//!
+//! ## Quick Start (Vello)
 //!
 //! ```rust,no_run
 //! use webkit::{WebKitConfiguration, WebView};
@@ -23,23 +31,23 @@
 //!     let web_view = WebView::new(config).expect("failed to create web view");
 //!     web_view.load_url("https://tontoo-os.github.io");
 //!
-//!     // web_view.widget() returns a gtk::Widget that can be added to any
-//!     // GTK4 container or embedded in a UIKit view.
+//!     // web_view.poll_frame() returns the latest SharedFrame; blit it
+//!     // as a Vello texture, or embed WebViewContent in a TontooUI tree.
 //! }
 //! ```
 //!
-//! UIKit apps embed a web view through [`WebViewContent`], which implements
-//! `uikit::view::ViewContent`:
+//! TontooUI apps embed a web view through [`tontooui_view::WebViewContent`],
+//! which implements `tontooui::elements::layout::View`:
 //!
 //! ```rust,no_run
-//! use uikit::prelude::*;
+//! use tontooui::elements::layout::{View, VStack};
 //! use webkit::{WebKitConfiguration, WebViewContent};
 //!
 //! let content = WebViewContent::new(
 //!     WebKitConfiguration::new().start_url("https://example.com"),
 //! ).expect("failed to create web view");
 //!
-//! let view = View::new(content).with_frame(0.0, 0.0, 800.0, 600.0);
+//! let stack = VStack::new().child(content);
 //! ```
 
 pub mod config;
@@ -47,32 +55,59 @@ pub mod cookie;
 pub mod data_store;
 pub mod delegate;
 pub mod download;
+pub mod engine;
 pub mod error;
+#[cfg(feature = "gtk-backend")]
 pub mod ffi;
 pub mod geolocation;
+#[cfg(feature = "gtk-backend")]
 pub mod json;
 pub mod lang;
 pub mod navigation;
 pub mod script;
 pub mod settings;
+#[cfg(feature = "vello")]
+pub mod tontooui_view;
+#[cfg(feature = "gtk-backend")]
 pub mod uikit_view;
+#[cfg(feature = "vello")]
+pub mod view;
+#[cfg(feature = "gtk-backend")]
 pub mod web_view;
 
 pub use config::{DataStoreKind, WebKitConfiguration};
+#[cfg(feature = "gtk-backend")]
 pub use cookie::{Cookie, CookieAcceptPolicy, CookieManager, CookieStorage};
-pub use data_store::{WebsiteData, WebsiteDataType, WebsiteDataStore};
+#[cfg(not(feature = "gtk-backend"))]
+pub use cookie::{Cookie, CookieAcceptPolicy, CookieStorage};
+#[cfg(feature = "gtk-backend")]
+pub use data_store::{WebsiteData, WebsiteDataStore, WebsiteDataType};
+#[cfg(not(feature = "gtk-backend"))]
+pub use data_store::{WebsiteData, WebsiteDataType};
 pub use delegate::{
     DefaultWebViewDelegate, PermissionDecision, PermissionKind, ScriptDialogKind, ScriptDialogRef,
     WebViewDelegate,
 };
 pub use download::{DefaultDownloadDelegate, DownloadDelegate, WebDownload};
+pub use engine::{EngineCommand, EngineEvent, MockEngine, SharedFrame, WebEngine};
 pub use error::WebKitError;
 pub use geolocation::attach_core_location;
 pub use navigation::{NavigationAction, NavigationEvent, PolicyAction, WebNavigationDelegate};
 pub use script::{ScriptFrameInjection, ScriptInjectionTime, ScriptMessageHandler, WebScript};
 pub use settings::{AutoPlay, CacheModel, WebSettings, WebSettingsBuilder};
+#[cfg(all(feature = "vello", not(feature = "gtk-backend")))]
+pub use tontooui_view::WebViewContent;
+#[cfg(all(feature = "vello", feature = "gtk-backend"))]
+pub use tontooui_view::WebViewContent as VelloWebViewContent;
+#[cfg(feature = "gtk-backend")]
+#[allow(deprecated)]
 pub use uikit_view::WebViewContent;
-pub use web_view::{WebView, WebViewBuilder};
+#[cfg(all(feature = "vello", not(feature = "gtk-backend")))]
+pub use view::{WebView, WebViewBuilder};
+#[cfg(all(feature = "vello", feature = "gtk-backend"))]
+pub use view::{WebView as VelloWebView, WebViewBuilder as VelloWebViewBuilder};
+#[cfg(feature = "gtk-backend")]
+pub use web_view::{WebView as GtkWebView, WebViewBuilder as GtkWebViewBuilder};
 
 /// Version of the TontooWebKit framework (major, minor, patch).
 pub const WEBKIT_VERSION: (u32, u32, u32) = (26, 1, 0);
@@ -80,13 +115,20 @@ pub const WEBKIT_VERSION: (u32, u32, u32) = (26, 1, 0);
 /// Convenience re-exports for a single `use webkit::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        attach_core_location, AutoPlay, CacheModel, Cookie, CookieAcceptPolicy, CookieManager,
-        CookieStorage, DataStoreKind, DefaultDownloadDelegate, DefaultWebViewDelegate,
-        DownloadDelegate, NavigationAction, NavigationEvent, PermissionDecision, PermissionKind,
-        PolicyAction, ScriptDialogKind, ScriptDialogRef, ScriptFrameInjection, ScriptInjectionTime,
-        ScriptMessageHandler, WebDownload, WebKitConfiguration, WebKitError, WebNavigationDelegate,
-        WebScript, WebSettings, WebView, WebViewBuilder, WebViewContent, WebViewDelegate,
-        WebsiteData, WebsiteDataType, WebsiteDataStore,
+        attach_core_location, AutoPlay, CacheModel, Cookie, CookieAcceptPolicy, CookieStorage,
+        DataStoreKind, DefaultDownloadDelegate, DefaultWebViewDelegate, DownloadDelegate,
+        EngineCommand, EngineEvent, MockEngine, NavigationAction, NavigationEvent,
+        PermissionDecision, PermissionKind, PolicyAction, ScriptDialogKind, ScriptDialogRef,
+        ScriptFrameInjection, ScriptInjectionTime, ScriptMessageHandler, SharedFrame, WebDownload,
+        WebEngine, WebKitConfiguration, WebKitError, WebNavigationDelegate, WebScript, WebSettings,
+        WebSettingsBuilder,
     };
+    #[cfg(feature = "gtk-backend")]
+    pub use crate::{CookieManager, GtkWebView, GtkWebViewBuilder, WebsiteDataStore};
+    pub use crate::{WebsiteData, WebsiteDataType};
+    #[cfg(all(feature = "vello", not(feature = "gtk-backend")))]
+    pub use crate::{WebView, WebViewBuilder, WebViewContent};
+    #[cfg(all(feature = "vello", feature = "gtk-backend"))]
+    pub use crate::{VelloWebView, VelloWebViewBuilder, VelloWebViewContent};
     pub use crate::WEBKIT_VERSION;
 }

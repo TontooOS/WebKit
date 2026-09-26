@@ -4,8 +4,10 @@ TontooWebKit is the web content framework for TontooOS. It follows Apple's
 WebKit design philosophy with a `WebView` widget, a `WebKitConfiguration`
 object (start URL, settings, user scripts, message handlers, data store),
 navigation and view delegates, and a C FFI for non-Rust consumers. The
-rendering backend is WebKitGTK (the Apple WebKit engine on GTK4), so there
-is no Chromium code in the stack.
+default backend is engine-neutral (WPE WebKit out-of-process; mock frames
+until the helper lands) and blits into TontooUI as a Vello texture, so
+there is no Chromium code and no GTK dependency in the stack. The legacy
+WebKitGTK backend stays available behind the `gtk-backend` cargo feature.
 
 - Repository: tontoo-os/TontooLibs/WebKit
 - License: MIT
@@ -27,8 +29,9 @@ is no Chromium code in the stack.
 | Downloads | [Downloads.md](Downloads.md) | Download delegate and save-location handling |
 | DialogsAndPermissions | [DialogsAndPermissions.md](DialogsAndPermissions.md) | JS dialogs and permission requests |
 | Geolocation | [Geolocation.md](Geolocation.md) | Page geolocation backed by CoreLocation |
-| FFI | [Ffi.md](Ffi.md) | C API and `Headers/webkit.h` |
-| UIKit | [UIKit.md](UIKit.md) | Embedding in UIKit apps via `WebViewContent` |
+| FFI | [Ffi.md](Ffi.md) | C API and `Headers/webkit.h` (`gtk-backend` only) |
+| UIKit | [UIKit.md](UIKit.md) | Legacy GTK embedding shim (deprecated) |
+| Backend | [Backend.md](Backend.md) | Engine trait, WPE plan, cargo features, IPC |
 
 ## Quick Start
 
@@ -41,32 +44,29 @@ fn main() {
         .private_browsing(true);
 
     let web_view = WebView::new(config).expect("failed to create web view");
-    let widget = web_view.widget();
-    // add `widget` to any GTK4 container or UIKit view.
+    let frame = web_view.poll_frame();
+    // blit `frame` as a Vello texture, or embed WebViewContent in TontooUI.
 }
 ```
 
-See [WebView.md](WebView.md) and [UIKit.md](UIKit.md) for details.
+See [WebView.md](WebView.md), [Backend.md](Backend.md) and the
+`vello_webview` example for details.
 
 ## Architecture
 
 ```
 WebKitConfiguration (start URL, settings, scripts, handlers, data store)
   |
-  +-- WebView            (wraps WebKitGTK's WebView widget)
-  |     +-- WebViewDelegate         (title, url, progress, load, script messages,
-  |     |                            JS dialogs, permission requests)
-  |     +-- WebNavigationDelegate   (navigation events, policy decisions)
-  |     +-- DownloadDelegate        (download destinations and progress)
+  +-- WebView (backend-neutral, view.rs)
+  |     +-- WebEngine trait (engine.rs: MockEngine now, WPE helper planned)
+  |     +-- SharedFrame (BGRA pixels -> Vello texture via WebViewContent)
+  |     +-- WebViewDelegate / WebNavigationDelegate / DownloadDelegate
   |
-  +-- WebSettings        (applied to the engine settings object)
-  +-- WebScript / ScriptMessageHandler   (injected JS + message bridge)
-  +-- WebsiteDataStore   (default / ephemeral / custom + clear)
-  +-- CookieManager      (accept policy, read/write cookies, persistence)
-  +-- Geolocation        (CoreLocation-backed position provider)
+  +-- WebSettings / WebScript / ScriptMessageHandler (serializable)
+  +-- TontooUI: WebViewContent (tontooui::View, texture blit + input)
   |
-  +-- FFI                (C ABI, Headers/webkit.h)
-  +-- WebViewContent     (uikit::view::ViewContent for UIKit apps)
+  +-- Legacy (feature gtk-backend): GtkWebView (WebKitGTK widget),
+  |     CookieManager, WebsiteDataStore, C FFI, UIKit shim
 ```
 
 ## Performance Notes
@@ -95,6 +95,13 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
   yet** -- recreate the view instead. See [DataStore.md](DataStore.md).
 
 ## Changelog
+
+- 2026-09-26: Vello backend split -- backend-neutral `WebView`
+  (`WebEngine` trait, `SharedFrame`, `EngineCommand`/`EngineEvent`,
+  `MockEngine`), `WebViewContent` for TontooUI texture blit, `vello`
+  (default) and `gtk-backend` cargo features, GTK/FFI/cookie/data-store
+  code gated behind `gtk-backend`, `uikit` dependency removed,
+  `vello_webview` example. WPE helper process is planned, not shipped.
 
 - 2026-08-21: Geolocation -- `attach_core_location` feeds page positions
   from CoreLocation (GPS/WiFi/IP) through the engine geolocation manager;

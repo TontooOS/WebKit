@@ -5,6 +5,8 @@
 //! through the C FFI as JSON, or persisted as an app preference.
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "gtk-backend")]
 use webkit6 as wk;
 
 /// How automatic media playback is handled.
@@ -114,11 +116,8 @@ impl WebSettings {
         WebSettingsBuilder::default()
     }
 
-    /// Map the cache model onto the engine's context-level cache model.
-    ///
-    /// The engine applies the cache model on the shared web context.
-    /// `CacheModel::PrimaryWebBrowser` maps to the engine's most aggressive
-    /// model (`WebBrowser`), which is the strongest mode WebKitGTK offers.
+    /// Map the cache model onto the GTK engine's context-level cache model.
+    #[cfg(feature = "gtk-backend")]
     pub(crate) fn engine_cache_model(&self) -> wk::CacheModel {
         match self.cache_model {
             CacheModel::DocumentViewer => wk::CacheModel::DocumentViewer,
@@ -126,6 +125,7 @@ impl WebSettings {
         }
     }
 
+    #[cfg(feature = "gtk-backend")]
     pub(crate) fn apply_to(&self, s: &wk::Settings) {
         s.set_enable_javascript(self.javascript_enabled);
         s.set_enable_developer_extras(self.developer_extras);

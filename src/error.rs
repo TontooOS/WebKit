@@ -31,6 +31,7 @@ impl fmt::Display for WebKitError {
 
 impl std::error::Error for WebKitError {}
 
+#[cfg(feature = "gtk-backend")]
 impl From<glib::Error> for WebKitError {
     fn from(e: glib::Error) -> Self {
         WebKitError::Engine(e.to_string())

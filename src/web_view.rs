@@ -1,5 +1,10 @@
-//! The [`WebView`] widget and its builder, the equivalent of `WKWebView` in
-//! Apple WebKit.
+//! The legacy GTK [`WebView`] widget and its builder, the equivalent of
+//! `WKWebView` in Apple WebKit.
+//!
+//! Only compiled with the `gtk-backend` feature. Requires a GTK4 event
+//! loop and cannot be embedded in TontooUI (Vello) windows; new code
+//! targets the backend-neutral [`crate::view::WebView`] instead.
+#![cfg(feature = "gtk-backend")]
 
 use std::cell::RefCell;
 use std::rc::Rc;

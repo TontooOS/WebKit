@@ -7,6 +7,8 @@
 //! payload arrives as a `serde_json::Value` in Rust.
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "gtk-backend")]
 use webkit6 as wk;
 
 /// When a user script is injected into the document.
@@ -84,6 +86,7 @@ impl WebScript {
         self
     }
 
+    #[cfg(feature = "gtk-backend")]
     pub(crate) fn to_user_script(&self) -> wk::UserScript {
         let injected_frames = match self.frames {
             ScriptFrameInjection::TopFrame => wk::UserContentInjectedFrames::TopFrame,

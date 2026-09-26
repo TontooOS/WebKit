@@ -1,13 +1,14 @@
 //! Website data storage, the equivalent of `WKWebsiteDataStore` in Apple
 //! WebKit.
 //!
-//! Controls where cookies, caches and storage live, enables private
-//! (ephemeral) browsing, and clears stored website data.
+//! [`WebsiteDataType`] is backend-neutral. [`WebsiteDataStore`] needs the
+//! `gtk-backend` feature; the out-of-process engine owns its data store in
+//! the helper process.
 
-use std::time::Duration;
-
+#[cfg(feature = "gtk-backend")]
 use glib::translate::ToGlibPtr;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "gtk-backend")]
 use webkit6 as wk;
 
 /// A subset of website data that can be inspected or cleared.
@@ -83,6 +84,7 @@ impl WebsiteDataType {
         }
     }
 
+    #[cfg(feature = "gtk-backend")]
     pub(crate) fn as_ffi(&self) -> webkit6_sys::WebKitWebsiteDataTypes {
         let mut bits = 0;
         if self.memory_cache {
@@ -134,12 +136,16 @@ pub struct WebsiteData {
     pub size: u64,
 }
 
-/// The website data store backing a [`crate::WebView`].
+/// The website data store backing a GTK [`crate::WebView`].
+///
+/// Only available with the `gtk-backend` feature.
+#[cfg(feature = "gtk-backend")]
 #[derive(Debug, Clone)]
 pub struct WebsiteDataStore {
     manager: wk::WebsiteDataManager,
 }
 
+#[cfg(feature = "gtk-backend")]
 impl WebsiteDataStore {
     /// The default persistent data store.
     pub fn default() -> Self {
@@ -178,7 +184,7 @@ impl WebsiteDataStore {
     ///
     /// Blocks until the engine finishes clearing. Returns `Err` when the
     /// operation fails or is cancelled.
-    pub fn clear(&self, types: WebsiteDataType, time_span: Duration) -> Result<(), crate::WebKitError> {
+    pub fn clear(&self, types: WebsiteDataType, time_span: std::time::Duration) -> Result<(), crate::WebKitError> {
         let timespan = time_span.as_micros().min(i64::MAX as u128) as i64;
         self.clear_timespan(types, timespan)
     }
@@ -190,12 +196,18 @@ impl WebsiteDataStore {
 
     /// Clear only cookies.
     pub fn clear_cookies(&self) -> Result<(), crate::WebKitError> {
-        self.clear(WebsiteDataType::cookies(), Duration::from_secs(u64::MAX))
+        self.clear(
+            WebsiteDataType::cookies(),
+            std::time::Duration::from_secs(u64::MAX),
+        )
     }
 
     /// Clear only caches.
     pub fn clear_caches(&self) -> Result<(), crate::WebKitError> {
-        self.clear(WebsiteDataType::caches(), Duration::from_secs(u64::MAX))
+        self.clear(
+            WebsiteDataType::caches(),
+            std::time::Duration::from_secs(u64::MAX),
+        )
     }
 
     fn clear_timespan(&self, types: WebsiteDataType, timespan: i64) -> Result<(), crate::WebKitError> {
@@ -223,6 +235,7 @@ impl WebsiteDataStore {
     }
 }
 
+#[cfg(feature = "gtk-backend")]
 unsafe extern "C" fn clear_cb(
     _source: *mut glib::gobject_ffi::GObject,
     _res: *mut gio::ffi::GAsyncResult,

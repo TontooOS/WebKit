@@ -1,4 +1,10 @@
 //! Converters from the engine's value types to `serde_json::Value`.
+//!
+//! Only compiled with the `gtk-backend` feature. The out-of-process WPE
+//! engine transfers JavaScript results as JSON over IPC, so no conversion
+//! is needed there.
+
+#![cfg(feature = "gtk-backend")]
 
 /// Convert a `glib::Value` (returned by `evaluate_javascript`) to JSON.
 ///

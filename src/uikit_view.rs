@@ -1,33 +1,35 @@
-//! UIKit embedding for TontooWebKit.
+//! Legacy UIKit embedding shim.
 //!
-//! [`WebViewContent`] implements `uikit::view::ViewContent`, so a web view
-//! can be added to any UIKit view tree exactly like a label or a button.
+//! The `uikit` crate no longer exists (TontooUI is its successor), so this
+//! module only compiles with the `gtk-backend` feature and no longer
+//! implements any UIKit trait. It keeps the `WebViewContent` name alive so
+//! GTK codebases keep building.
+//!
+//! New code targets [`crate::tontooui_view::WebViewContent`] (feature
+//! `vello`) instead.
 
-use uikit::style::Rect;
-use uikit::view::ViewContent;
+#![cfg(feature = "gtk-backend")]
 
 use crate::config::WebKitConfiguration;
 use crate::error::WebKitError;
 use crate::web_view::WebView;
 
-/// A UIKit-compatible wrapper around a [`WebView`].
+/// Legacy GTK wrapper kept under its historic name.
 ///
-/// ```rust,no_run
-/// use uikit::prelude::*;
-/// use webkit::{WebKitConfiguration, WebViewContent};
-///
-/// let web = WebViewContent::new(
-///     WebKitConfiguration::new().start_url("https://example.com"),
-/// ).expect("failed to create web view");
-///
-/// let view = View::new(web).with_frame(0.0, 0.0, 800.0, 600.0);
-/// ```
+/// Wraps a GTK [`WebView`] and exposes its widget. Deprecated: use the
+/// backend-neutral [`crate::view::WebView`] with
+/// [`crate::tontooui_view::WebViewContent`] for TontooUI windows.
+#[deprecated(
+    since = "26.1.0",
+    note = "use tontooui_view::WebViewContent with the vello feature instead"
+)]
 pub struct WebViewContent {
     inner: WebView,
 }
 
+#[allow(deprecated)]
 impl WebViewContent {
-    /// Create the UIKit content wrapper from a configuration.
+    /// Create the wrapper from a configuration.
     pub fn new(config: WebKitConfiguration) -> Result<Self, WebKitError> {
         Ok(Self {
             inner: WebView::new(config)?,
@@ -38,10 +40,9 @@ impl WebViewContent {
     pub fn web_view(&self) -> &WebView {
         &self.inner
     }
-}
 
-impl ViewContent for WebViewContent {
-    fn render(&self, _frame: Rect) -> gtk::Widget {
+    /// The underlying GTK4 widget.
+    pub fn widget(&self) -> gtk::Widget {
         self.inner.widget()
     }
 }
