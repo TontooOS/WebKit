@@ -55,6 +55,8 @@ pub mod cookie;
 pub mod data_store;
 #[cfg(feature = "chromium")]
 pub mod chromium;
+#[cfg(feature = "chromium")]
+pub mod chrome_provision;
 pub mod delegate;
 pub mod download;
 pub mod engine;

@@ -98,6 +98,11 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
 
 ## Changelog
 
+- 2026-09-26: Chromium auto-update -- `chrome_provision.rs` downloads
+  and smoke-tests Chrome-for-Testing (newest-first ladder, glibc-safe),
+  daily background updates, managed dir, `TONTOO_CHROME_*` env table;
+  PATH binaries are smoke-tested; CDP launch hardened (HTTP/1.1 with
+  Content-Length reads, target polling, no background networking).
 - 2026-09-26: Chromium renderer -- headless Chromium over CDP
   (`chromium.rs`, `chromium` feature on by default): real pages in the
   Chromium sandbox, screenshots, input, JavaScript, cookies, downloads,

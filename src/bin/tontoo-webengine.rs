@@ -604,6 +604,12 @@ fn main() {
         slot_dir: slot_dir.clone(),
         seq: 0,
     };
+    #[cfg(feature = "chromium")]
+    if choice == "auto" || choice == "chromium" {
+        // Refresh the managed build at most once a day, in the
+        // background; the current build keeps serving meanwhile.
+        webkit::chrome_provision::maybe_background_update();
+    }
     let mut renderer = build_renderer(&choice, &slot_dir, &mut emit);
 
     if ping {

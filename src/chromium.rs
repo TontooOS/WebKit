@@ -34,8 +34,10 @@ pub const CDP_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long to wait for the DevTools endpoint at launch.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// Locate a Chromium binary: `CHROMIUM_BIN`/`CHROME_BIN`, then well-known
-/// names on `PATH`.
+/// Locate a Chromium binary: `CHROMIUM_BIN`/`CHROME_BIN`, the managed
+/// self-provisioned build, then well-known names on `PATH` (smoke-tested,
+/// so a broken system build is skipped). As a last resort (auto-update
+/// enabled) a build is downloaded.
 pub fn find_chrome() -> Result<PathBuf, String> {
     for var in ["CHROMIUM_BIN", "CHROME_BIN"] {
         if let Ok(path) = std::env::var(var) {
@@ -44,6 +46,9 @@ pub fn find_chrome() -> Result<PathBuf, String> {
                 return Ok(path);
             }
         }
+    }
+    if let Some((_, bin)) = super::chrome_provision::installed() {
+        return Ok(bin);
     }
     for name in [
         "chromium",
@@ -55,10 +60,13 @@ pub fn find_chrome() -> Result<PathBuf, String> {
         "chrome.exe",
     ] {
         if let Some(path) = super::transport::find_on_path(name) {
-            return Ok(path);
+            if super::chrome_provision::smoke_test(&path) {
+                return Ok(path);
+            }
+            eprintln!("tontoo-webengine: system {name} does not run, skipping");
         }
     }
-    Err("no Chromium binary found (set CHROMIUM_BIN)".into())
+    super::chrome_provision::ensure_chrome()
 }
 
 /// Raw CDP event (method + params) coming off a connection.
@@ -409,6 +417,10 @@ pub(crate) fn chrome_args(port: u16, profile: &std::path::Path, no_sandbox: bool
         "--hide-scrollbars".to_string(),
         "--disable-dev-shm-usage".to_string(),
         "--enable-unsafe-swiftshader".to_string(),
+        // No background network: component updates and friends stall
+        // CDP responses on first run (and leak beyond the page).
+        "--disable-component-update".to_string(),
+        "--disable-background-networking".to_string(),
         format!("--user-data-dir={}", profile.to_string_lossy()),
         "about:blank".to_string(),
     ];
@@ -468,9 +480,18 @@ impl CdpPage {
                 }
             }
         });
-        let browser_url = ws_rx
-            .recv_timeout(LAUNCH_TIMEOUT)
-            .map_err(|_| "timed out waiting for DevTools endpoint".to_string())?;
+        let browser_url = ws_rx.recv_timeout(LAUNCH_TIMEOUT).map_err(|e| {
+            use std::sync::mpsc::RecvTimeoutError;
+            match e {
+                // Child died before printing the endpoint (broken binary).
+                RecvTimeoutError::Disconnected => {
+                    "chromium exited during startup (broken binary?)".to_string()
+                }
+                RecvTimeoutError::Timeout => {
+                    "timed out waiting for DevTools endpoint".to_string()
+                }
+            }
+        })?;
         // Talk HTTP to the same authority the browser WebSocket proved.
         let (http_host, http_port) = ws_authority(&browser_url, port);
 

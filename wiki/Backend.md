@@ -147,12 +147,15 @@ JavaScript runs inside the real Chromium sandbox with site isolation;
 our processes only ever see screenshots, JSON values and cookies.
 
 - Launch: `chromium --headless=new --remote-debugging-port=<free>`,
-  sandbox left ON. Flags are fixed in `chrome_args`; the sandbox is
-  only disabled with `TONTOO_CHROME_NO_SANDBOX=1` (containers without
-  user namespaces, never for daily use).
-- Binary lookup: `CHROMIUM_BIN`/`CHROME_BIN`, then `chromium`,
-  `chromium-browser`, `google-chrome`, `google-chrome-stable`, `chrome`
-  on `PATH`. Without a binary the helper falls back to mock.
+  sandbox left ON, background networking and component updates off.
+  Flags are fixed in `chrome_args`; the sandbox is only disabled with
+  `TONTOO_CHROME_NO_SANDBOX=1` (containers without user namespaces,
+  never for daily use).
+- Binary lookup: `CHROMIUM_BIN`/`CHROME_BIN`, the managed
+  self-provisioned build, then `chromium`, `chromium-browser`,
+  `google-chrome`, `google-chrome-stable`, `chrome` on `PATH`
+  (smoke-tested, broken builds are skipped). Without any binary the
+  helper falls back to mock.
 - One page target plus the browser endpoint (two CDP sessions):
   navigation, history (`Page.getNavigationHistory`), screenshots
   (`Page.captureScreenshot` decoded to BGRA), input (`Input.*`),
@@ -174,9 +177,33 @@ our processes only ever see screenshots, JSON values and cookies.
 |---|---|
 | `CHROMIUM_BIN` / `CHROME_BIN` | Chromium binary override |
 | `TONTOO_CHROME_NO_SANDBOX=1` | Disable the Chromium sandbox (test containers only) |
+| `TONTOO_CHROME_DIR` | Managed install dir override |
+| `TONTOO_CHROME_AUTOUPDATE=0` | Disable all network provisioning |
 | `TONTOO_WEBENGINE_RENDERER` | Helper default: `auto`, `mock` or `chromium` (`--renderer` flag wins) |
 | `TONTOO_WEBENGINE_DEBUG=1` | CDP setup markers and reader heartbeats on stderr |
 | `TONTOO_E2E_TIMEOUT_SECS` | First-frame budget of `tests/chromium_cdp.rs` (default 240) |
+
+## Chromium Auto-Update (`chrome_provision.rs`)
+
+The helper provisions and updates its own Chrome-for-Testing build, so
+TontooOS and WSL installations always run a patched Chromium without a
+distro package:
+
+- Managed dir: `~/.local/share/tontoo-webengine/chrome` on Linux
+  (`%LOCALAPPDATA%/TontooWebEngine/chrome` on Windows),
+  `TONTOO_CHROME_DIR` overrides. Layout: `VERSION`, one dir per
+  version, `LAST_UPDATE_CHECK`, cached milestone list.
+- First run without a binary: download current Stable, smoke-test it
+  (`chrome --version` must exit 0 -- this rejects builds needing a
+  newer glibc than the host provides, e.g. old WSL containers), then
+  walk older milestones newest-first until one runs. Only runnable
+  builds are ever installed; Disk use is one version at a time.
+- Every helper start refreshes at most once a day in a background
+  thread; the running build keeps serving, the new one activates on
+  the next start. `TONTOO_CHROME_AUTOUPDATE=0` disables everything.
+- WSL note: no distro package needed. If the container glibc predates
+  current Stable, the ladder automatically settles on the newest
+  runnable milestone for that machine.
 
 End-to-end proof (helper binary plus system Chromium required):
 

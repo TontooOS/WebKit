@@ -20,9 +20,12 @@ vello = { version = "0.10", optional = true }
 
 # Chromium path: headless Chromium driven over CDP (DevTools protocol).
 # Pure Rust (websocket + PNG decode), needs a Chromium binary at RUNTIME
-# only -- page JS runs inside the real Chromium sandbox.
+# only -- page JS runs inside the real Chromium sandbox. The helper can
+# provision and auto-update a Chrome-for-Testing build itself (ureq+zip).
 tungstenite = { version = "0.26", optional = true }
 image = { version = "0.25", optional = true }
+ureq = { version = "3", optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 # Legacy GTK4 path: WebKitGTK widget embedding. Requires system
 # webkit2gtk-4.1 and a GTK4 event loop; cannot be used inside
@@ -38,7 +41,7 @@ soup = { package = "soup3", version = "0.7", optional = true }
 [features]
 default = ["vello", "chromium"]
 vello = ["dep:tontooui", "dep:vello"]
-chromium = ["dep:tungstenite", "dep:image"]
+chromium = ["dep:tungstenite", "dep:image", "dep:ureq", "dep:zip"]
 gtk-backend = ["dep:gtk", "dep:gio", "dep:glib", "dep:webkit6", "dep:webkit6-sys", "dep:javascriptcore6", "dep:soup"]
 
 [lib]
