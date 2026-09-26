@@ -59,7 +59,7 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
   |
   +-- WebView (backend-neutral, view.rs)
   |     +-- WebEngine trait (engine.rs: MockEngine, ProcessEngine)
-  |     +-- tontoo-webengine helper (frame files + line protocol)
+  |     +-- tontoo-webengine helper (mock or Chromium/CDP renderer)
   |     +-- SharedFrame (BGRA pixels -> Vello texture via WebViewContent)
   |     +-- WebViewDelegate / WebNavigationDelegate / DownloadDelegate
   |     +-- Vello C ABI (ffi_vello.rs, Headers/webkit_vello.h)
@@ -98,6 +98,12 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
 
 ## Changelog
 
+- 2026-09-26: Chromium renderer -- headless Chromium over CDP
+  (`chromium.rs`, `chromium` feature on by default): real pages in the
+  Chromium sandbox, screenshots, input, JavaScript, cookies, downloads,
+  dialogs; `SpecialKey` command plus `History` event; Vello
+  `key_press` C function; `tests/chromium_cdp.rs` proves `1+1 == 2`
+  end to end. CEF OSR documented as the 60 fps production path.
 - 2026-09-26: Helper discovery fix -- `find_helper` walks up from the
   executable (cargo `examples/`/`deps/` layouts), so the demos find the
   helper after one `cargo build`. `cargo run --example` alone does not

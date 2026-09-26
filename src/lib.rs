@@ -53,6 +53,8 @@
 pub mod config;
 pub mod cookie;
 pub mod data_store;
+#[cfg(feature = "chromium")]
+pub mod chromium;
 pub mod delegate;
 pub mod download;
 pub mod engine;

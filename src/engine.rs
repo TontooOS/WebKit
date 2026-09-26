@@ -117,6 +117,11 @@ pub enum EngineCommand {
         dy: f64,
     },
     KeyText(String),
+    /// Non-printable key press ("Enter", "Backspace", "Escape",
+    /// "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown").
+    SpecialKey {
+        key: String,
+    },
     Reload,
     ReloadBypassCache,
     GoBack,
@@ -228,6 +233,11 @@ pub enum EngineEvent {
     Cookies {
         id: u64,
         cookies: Vec<Cookie>,
+    },
+    /// Session history state (back/forward availability).
+    History {
+        can_back: bool,
+        can_forward: bool,
     },
     ReadyToShow,
 }

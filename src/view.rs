@@ -27,8 +27,13 @@ use crate::navigation::{DefaultWebNavigationDelegate, WebNavigationDelegate};
 use crate::script::ScriptMessageHandler;
 use crate::settings::WebSettings;
 
-/// How long [`WebView::evaluate_javascript`] waits for the engine answer.
-pub const JS_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long [`WebView::evaluate_javascript`] and [`WebView::list_cookies`]
+/// wait for the engine answer while pumping events.
+///
+/// Blocking matches the legacy GTK behavior (which blocked indefinitely);
+/// slow first-starts (cold browser, software rendering) need the headroom.
+/// Prefer a future async API for latency-sensitive UI code.
+pub const JS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A web view without a toolkit widget. Frames are pulled with
 /// [`WebView::poll_frame`] and drawn as a Vello texture.
@@ -266,6 +271,14 @@ impl WebView {
             .send(EngineCommand::KeyText(text.to_string()));
     }
 
+    /// Forward a non-printable key press (`Enter`, `Backspace`, `Escape`,
+    /// `ArrowLeft`, `ArrowUp`, `ArrowRight`, `ArrowDown`).
+    pub fn press_key(&self, key: &str) {
+        self.engine.send(EngineCommand::SpecialKey {
+            key: key.to_string(),
+        });
+    }
+
     /// Apply one engine event (called by the IPC pump in the reader
     /// thread or the run loop; unit tests call it directly).
     ///
@@ -421,6 +434,13 @@ impl WebView {
                 if let Some(tx) = self.pending_cookies.borrow_mut().remove(&id) {
                     let _ = tx.try_send(cookies);
                 }
+            }
+            E::History {
+                can_back,
+                can_forward,
+            } => {
+                *self.can_back.borrow_mut() = can_back;
+                *self.can_forward.borrow_mut() = can_forward;
             }
         }
     }

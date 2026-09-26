@@ -115,6 +115,7 @@ tontoo_webkit_view_set_callbacks(view, cb, NULL);
 | `void` | `tontoo_vello_view_mouse_down/up/move(view, x, y)` | Logical px |
 | `void` | `tontoo_vello_view_scroll(view, dx, dy)` | Logical px |
 | `void` | `tontoo_vello_view_key_text(view, text)` | UTF-8, NUL-terminated |
+| `void` | `tontoo_vello_view_key_press(view, key)` | `Enter`, `Backspace`, `Escape`, arrows |
 | `char *` | `tontoo_vello_view_evaluate_javascript(view, script, error_out)` | JSON string, blocks up to 5 s, free with `string_free` |
 | `int` | `tontoo_vello_view_poll_script_message(view, name_out, body_json_out)` | `1` message, `0` empty, `-1` on NULL handle |
 | `char *` | `tontoo_vello_view_get_url(view)` / `tontoo_vello_view_get_title(view)` | Free with `string_free` |

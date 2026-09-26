@@ -175,8 +175,19 @@ impl View for WebViewContent {
         self.inner.input_text(text);
     }
 
-    fn key(&mut self, _key: Key) -> bool {
-        false
+    fn key(&mut self, key: Key) -> bool {
+        let name = match key {
+            Key::Enter => "Enter",
+            Key::Backspace => "Backspace",
+            Key::Escape => "Escape",
+            Key::Left => "ArrowLeft",
+            Key::Right => "ArrowRight",
+            Key::Up => "ArrowUp",
+            Key::Down => "ArrowDown",
+            _ => return false,
+        };
+        self.inner.press_key(name);
+        true
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {

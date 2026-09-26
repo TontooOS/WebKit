@@ -11,7 +11,9 @@ WebView (src/view.rs, no toolkit dependency)
   |-- WebEngine trait (src/engine.rs)
   |     |-- MockEngine ......... checkerboard, unit tests
   |     |-- ProcessEngine ...... spawns tontoo-webengine (src/transport.rs)
-  |     +-- WpeEngine (planned)  WPE WebKit inside the helper
+  |     |     |-- MockRenderer . animated placeholder + mock cookies
+  |     |     +-- ChromiumRenderer (CDP, real pages in the sandbox)
+  |     +-- CefOsr (planned) ... CEF offscreen rendering, same protocol
   |-- SharedFrame { seq, width, height, rgba }
   +-- EngineCommand / EngineEvent (serializable IPC vocabulary)
 ```
@@ -137,19 +139,74 @@ The helper (`src/bin/tontoo-webengine.rs`) is a plain child process:
 - Headless self test: `tontoo-webengine --slot-dir <dir> --ping` prints
   `FrameReady` and writes exactly `800 * 600 * 4` bytes.
 
-## WPE Slot (Planned)
+## Chromium Renderer (Production)
 
-The production renderer is WPE WebKit (same Apple WebKit engine as the
-legacy GTK backend, but Wayland-native without GTK) inside the helper.
-Swap `render()` for the `wpe_view_backend_exportable_fdo` readback and
-everything upstream (view, TontooUI embedding, C ABI) keeps working
-unchanged:
+The helper drives headless Chromium over the DevTools protocol
+(`src/chromium.rs`, cargo feature `chromium`, on by default). Page
+JavaScript runs inside the real Chromium sandbox with site isolation;
+our processes only ever see screenshots, JSON values and cookies.
 
-- Renders offscreen through `wpe_view_backend_exportable_fdo` (EGL) and
-  exports BGRA frames via `memfd` shared memory plus damage rects.
-- Runs sandboxed (`bubblewrap`, `xdg-dbus-proxy`); a page crash never
-  kills the app process.
-- System packages on TontooOS: `wpewebkit`, `libwpe`, `wpebackend-fdo`.
+- Launch: `chromium --headless=new --remote-debugging-port=<free>`,
+  sandbox left ON. Flags are fixed in `chrome_args`; the sandbox is
+  only disabled with `TONTOO_CHROME_NO_SANDBOX=1` (containers without
+  user namespaces, never for daily use).
+- Binary lookup: `CHROMIUM_BIN`/`CHROME_BIN`, then `chromium`,
+  `chromium-browser`, `google-chrome`, `google-chrome-stable`, `chrome`
+  on `PATH`. Without a binary the helper falls back to mock.
+- One page target plus the browser endpoint (two CDP sessions):
+  navigation, history (`Page.getNavigationHistory`), screenshots
+  (`Page.captureScreenshot` decoded to BGRA), input (`Input.*`),
+  JavaScript (`Runtime.evaluate` with real values), cookies
+  (`Storage.*`), downloads (`Page.setDownloadBehavior` allow into the
+  slot dir, `Browser.downloadWillBegin/Progress`, `Browser.cancelDownload`)
+  and dialogs (`Page.javascriptDialogOpening` /
+  `Page.handleJavaScriptDialog`).
+- Permissions fail closed: Chromium auto-denies prompts unless
+  pre-granted, and this driver never pre-grants, matching the
+  deny-by-default delegate.
+- Screenshots are captured on load, input, resize and dialog
+  transitions (not 60 fps); interactive smoothness is the reason the
+  CEF path below exists.
+- `evaluate_javascript` and `list_cookies` block up to `JS_TIMEOUT`
+  (60 s) while pumping events, matching the legacy GTK behavior.
+
+| Env var | Meaning |
+|---|---|
+| `CHROMIUM_BIN` / `CHROME_BIN` | Chromium binary override |
+| `TONTOO_CHROME_NO_SANDBOX=1` | Disable the Chromium sandbox (test containers only) |
+| `TONTOO_WEBENGINE_RENDERER` | Helper default: `auto`, `mock` or `chromium` (`--renderer` flag wins) |
+| `TONTOO_WEBENGINE_DEBUG=1` | CDP setup markers and reader heartbeats on stderr |
+| `TONTOO_E2E_TIMEOUT_SECS` | First-frame budget of `tests/chromium_cdp.rs` (default 240) |
+
+End-to-end proof (helper binary plus system Chromium required):
+
+```bash
+TONTOO_WEBENGINE_BIN=../../target/debug/tontoo-webengine cargo test --test process
+CHROMIUM_BIN=/path/to/chrome cargo test --test chromium_cdp
+```
+
+The second test navigates a data URL, asserts `1+1 == 2` and
+`document.title == "Hello"` through the full stack, and round-trips
+the cookie jar.
+
+## CEF OSR (Planned Production Path)
+
+For 60 fps interactive pages (video, smooth scroll) the helper gains a
+third renderer on the Chromium Embedded Framework in windowless mode
+(`cef-rs` crate), keeping the same protocol, so the view, TontooUI
+embedding and C ABI stay untouched:
+
+- `CefWindowInfo::SetAsWindowless` plus `CefRenderHandler::OnPaint`:
+  BGRA pixels flow into the existing `frame.bgra` slot (later zero-copy
+  via DMA-BUF on Linux, D3D11 handles on Windows).
+- Input through `CefBrowserHost::SendXXX` driven by the existing
+  `MouseDown/Up/Move`, `Scroll`, `KeyText` and `SpecialKey` commands.
+- `cef::do_message_loop_work()` pumped from the helper main loop next
+  to the stdin/command pump.
+- Needs the shared CEF binaries at build time (`CEF_PATH`, see
+  `cef-rs`); the renderer stays behind a `cef` cargo feature so default
+  builds keep working without the SDK. WPE WebKit remains a possible
+  alternative renderer behind the same trait.
 
 ## Usage / Example
 

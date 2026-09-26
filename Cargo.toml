@@ -18,6 +18,12 @@ corelocation = { path = "../CoreLocation" }
 tontooui = { path = "../TontooUI", optional = true }
 vello = { version = "0.10", optional = true }
 
+# Chromium path: headless Chromium driven over CDP (DevTools protocol).
+# Pure Rust (websocket + PNG decode), needs a Chromium binary at RUNTIME
+# only -- page JS runs inside the real Chromium sandbox.
+tungstenite = { version = "0.26", optional = true }
+image = { version = "0.25", optional = true }
+
 # Legacy GTK4 path: WebKitGTK widget embedding. Requires system
 # webkit2gtk-4.1 and a GTK4 event loop; cannot be used inside
 # TontooUI (Vello) windows.
@@ -30,8 +36,9 @@ javascriptcore6 = { version = "0.4", optional = true }
 soup = { package = "soup3", version = "0.7", optional = true }
 
 [features]
-default = ["vello"]
+default = ["vello", "chromium"]
 vello = ["dep:tontooui", "dep:vello"]
+chromium = ["dep:tungstenite", "dep:image"]
 gtk-backend = ["dep:gtk", "dep:gio", "dep:glib", "dep:webkit6", "dep:webkit6-sys", "dep:javascriptcore6", "dep:soup"]
 
 [lib]

@@ -414,6 +414,27 @@ pub unsafe extern "C" fn tontoo_vello_view_key_text(
     }
 }
 
+/// Forward a non-printable key press (`Enter`, `Backspace`, `Escape`,
+/// `ArrowLeft`, `ArrowUp`, `ArrowRight`, `ArrowDown`; NUL-terminated).
+///
+/// # Safety
+///
+/// `view` must be valid; `key` must be NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn tontoo_vello_view_key_press(
+    view: *mut TontooVelloView,
+    key: *const c_char,
+) {
+    if let (Some(h), Some(key)) = (
+        handle(view),
+        (!key.is_null())
+            .then(|| CStr::from_ptr(key).to_str().ok())
+            .flatten(),
+    ) {
+        h.view.press_key(key);
+    }
+}
+
 /// Evaluate JavaScript, blocking up to 5 seconds for the JSON result.
 /// Returns NULL on error (see `error_out`). Free with
 /// `tontoo_vello_string_free()`.

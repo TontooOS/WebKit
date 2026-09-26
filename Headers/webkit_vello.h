@@ -89,6 +89,7 @@ void tontoo_vello_view_mouse_up(TontooVelloView *view, double x, double y);
 void tontoo_vello_view_mouse_move(TontooVelloView *view, double x, double y);
 void tontoo_vello_view_scroll(TontooVelloView *view, double dx, double dy);
 void tontoo_vello_view_key_text(TontooVelloView *view, const char *text);
+void tontoo_vello_view_key_press(TontooVelloView *view, const char *key);
 
 void tontoo_vello_view_go_back(TontooVelloView *view);
 void tontoo_vello_view_go_forward(TontooVelloView *view);

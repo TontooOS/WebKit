@@ -97,7 +97,7 @@ fn helper_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
-fn find_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let sep = if cfg!(windows) { ';' } else { ':' };
     for dir in std::env::split_paths(&path) {
