@@ -110,6 +110,84 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Build the helper binary once when it is missing. Returns true when a
+/// build ran to completion (successfully or not); false when no build
+/// was attempted or it had to be killed.
+///
+/// The build is killed as soon as cargo reports `waiting for file lock`:
+/// that means our own parent `cargo run` holds the target dir, and
+/// waiting would deadlock. A legit build (fresh checkout, standalone
+/// app) runs to completion however long linking takes.
+fn try_autobuild() -> bool {
+    if std::env::var_os("TONTOO_WEBENGINE_NO_AUTOBUILD").is_some() {
+        return false;
+    }
+    let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") else {
+        return false;
+    };
+    let manifest = PathBuf::from(manifest_dir).join("Cargo.toml");
+    if !manifest.is_file() {
+        return false;
+    }
+    eprintln!("tontoo-webengine: helper missing, building it once...");
+    let mut child = match Command::new("cargo")
+        .arg("build")
+        .arg("--bin")
+        .arg("tontoo-webengine")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("tontoo-webengine: cannot run cargo ({e})");
+            return false;
+        }
+    };
+    let stderr = child.stderr.take();
+    let contended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = contended.clone();
+    let watcher_thread = stderr.map(|stderr| {
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                if line.contains("waiting for file lock") {
+                    watcher.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
+            }
+        })
+    });
+    // Poll for lock contention; a real build just runs to completion.
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = watcher_thread.map(|t| t.join());
+                if !status.success() {
+                    eprintln!("tontoo-webengine: helper build failed");
+                }
+                return true;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                return false;
+            }
+        }
+        if contended.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("tontoo-webengine: build dir locked by parent cargo, skipping");
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = watcher_thread.map(|t| t.join());
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// A [`WebEngine`] implementation backed by the helper child process.
 pub struct ProcessEngine {
     child: Mutex<Child>,
@@ -121,9 +199,25 @@ pub struct ProcessEngine {
 
 impl ProcessEngine {
     /// Spawn the helper located by [`find_helper`].
+    ///
+    /// When the helper binary is missing (e.g. `cargo run --example`
+    /// never builds it), a guarded `cargo build --bin tontoo-webengine`
+    /// is attempted once: if cargo reports a contended file lock (the
+    /// parent `cargo run` holds it) the build is killed immediately and
+    /// the original error is returned instead of deadlocking. Set
+    /// `TONTOO_WEBENGINE_NO_AUTOBUILD` to skip the attempt.
     pub fn spawn() -> Result<Self, WebKitError> {
-        let bin = find_helper()?;
-        Self::spawn_with_bin(&bin)
+        match find_helper() {
+            Ok(bin) => Self::spawn_with_bin(&bin),
+            Err(first) => {
+                if try_autobuild() {
+                    if let Ok(bin) = find_helper() {
+                        return Self::spawn_with_bin(&bin);
+                    }
+                }
+                Err(first)
+            }
+        }
     }
 
     /// Spawn a specific helper binary (used by tests and the demo).
