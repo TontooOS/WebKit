@@ -149,7 +149,9 @@ fn download_agent() -> ureq::Agent {
 }
 
 /// Parse the Stable version out of last-known-good-versions.json.
-pub(crate) fn parse_last_known_good(json: &serde_json::Value) -> Option<String> {
+pub(crate) fn parse_last_known_good(
+    json: &foundation::serialization::JsonValue,
+) -> Option<String> {
     json.get("channels")?
         .get("Stable")?
         .get("version")?
@@ -160,14 +162,17 @@ pub(crate) fn parse_last_known_good(json: &serde_json::Value) -> Option<String> 
 /// Fetch the current Stable version.
 pub fn fetch_stable_version() -> Result<String, String> {
     let text = http_get_text(CFT_LAST_KNOWN_GOOD)?;
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("CfT json: {e}"))?;
+    let json = foundation::serialization::JsonValue::parse(&text)
+        .map_err(|e| format!("CfT json: {e}"))?;
     parse_last_known_good(&json).ok_or_else(|| "CfT json without Stable".into())
 }
 
 /// Version ladder: newest-first full versions per major that ship a build
 /// for this host, from known-good-versions-with-downloads.json.
-pub(crate) fn ladder(json: &serde_json::Value, platform: &str) -> Vec<String> {
+pub(crate) fn ladder(
+    json: &foundation::serialization::JsonValue,
+    platform: &str,
+) -> Vec<String> {
     use std::collections::BTreeMap;
     // major -> newest full version seen.
     let mut majors: BTreeMap<u64, String> = BTreeMap::new();
@@ -340,7 +345,7 @@ fn stamp_check(dir: &Path) {
 }
 
 /// Cached milestone list (24 h TTL), refreshed on demand.
-fn known_good_versions() -> Result<serde_json::Value, String> {
+fn known_good_versions() -> Result<foundation::serialization::JsonValue, String> {
     let dir = managed_dir();
     let cache = dir.join("known-good.json");
     let fresh = std::fs::metadata(&cache)
@@ -351,14 +356,14 @@ fn known_good_versions() -> Result<serde_json::Value, String> {
         .unwrap_or(false);
     if fresh {
         if let Ok(text) = std::fs::read_to_string(&cache) {
-            if let Ok(json) = serde_json::from_str(&text) {
+            if let Ok(json) = foundation::serialization::JsonValue::parse(&text) {
                 return Ok(json);
             }
         }
     }
     let text = http_get_text(CFT_KNOWN_GOOD)?;
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("CfT json: {e}"))?;
+    let json = foundation::serialization::JsonValue::parse(&text)
+        .map_err(|e| format!("CfT json: {e}"))?;
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(&cache, &text);
     Ok(json)
@@ -447,24 +452,29 @@ mod tests {
 
     #[test]
     fn stable_parsing() {
-        let json = serde_json::json!({
-            "channels": { "Stable": { "version": "154.0.8037.57" } }
-        });
+        let json = foundation::serialization::JsonValue::parse(
+            r#"{"channels": { "Stable": { "version": "154.0.8037.57" } }}"#,
+        )
+        .unwrap();
         assert_eq!(parse_last_known_good(&json).as_deref(), Some("154.0.8037.57"));
-        assert!(parse_last_known_good(&serde_json::json!({})).is_none());
+        assert!(parse_last_known_good(
+            &foundation::serialization::JsonValue::parse("{}").unwrap()
+        )
+        .is_none());
     }
 
     #[test]
     fn ladder_orders_majors_desc() {
-        let json = serde_json::json!({
-            "versions": [
+        let json = foundation::serialization::JsonValue::parse(
+            r#"{"versions": [
                 { "version": "154.0.1.0", "downloads": { "chrome": [{ "platform": "linux64", "url": "u" }] } },
                 { "version": "154.0.0.5", "downloads": { "chrome": [{ "platform": "linux64", "url": "u" }] } },
                 { "version": "153.2.0.0", "downloads": { "chrome": [{ "platform": "win64", "url": "u" }] } },
                 { "version": "152.9.9.9", "downloads": { "chrome": [{ "platform": "linux64", "url": "u" }] } },
-                { "version": "notaversion", "downloads": {} },
-            ]
-        });
+                { "version": "notaversion", "downloads": {} }
+            ]}"#,
+        )
+        .unwrap();
         // 153 lacks linux64, so the ladder is 154 then 152.
         assert_eq!(ladder(&json, "linux64"), vec!["154.0.1.0", "152.9.9.9"]);
     }

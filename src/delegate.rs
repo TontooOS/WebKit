@@ -1,11 +1,6 @@
 //! View-level state callbacks, the equivalent of combining
 //! `WKUIDelegate` and the `WKWebView` KVO notifications in Apple WebKit.
 
-#[cfg(feature = "gtk-backend")]
-use webkit6 as wk;
-
-use serde::{Deserialize, Serialize};
-
 /// Trait for observing web view state changes.
 ///
 /// All methods have default implementations, so implementing the trait only
@@ -30,7 +25,7 @@ pub trait WebViewDelegate {
     fn load_failed(&mut self, _url: Option<&str>, _error: &str) {}
 
     /// A page posted a message on one of the registered script channels.
-    fn script_message(&mut self, _name: &str, _body: serde_json::Value) {}
+    fn script_message(&mut self, _name: &str, _body: foundation::serialization::JsonValue) {}
 
     /// The web content is ready to be shown.
     fn ready_to_show(&mut self) {}
@@ -62,7 +57,7 @@ pub struct DefaultWebViewDelegate;
 impl WebViewDelegate for DefaultWebViewDelegate {}
 
 /// The kind of a JavaScript dialog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptDialogKind {
     /// `window.alert(message)`
     Alert,
@@ -74,58 +69,11 @@ pub enum ScriptDialogKind {
     BeforeUnloadConfirm,
 }
 
-/// Reference to an engine script dialog passed to
-/// [`WebViewDelegate::script_dialog`].
-#[cfg(feature = "gtk-backend")]
-pub struct ScriptDialogRef<'a> {
-    inner: &'a wk::ScriptDialog,
-}
-
-#[cfg(feature = "gtk-backend")]
-impl<'a> ScriptDialogRef<'a> {
-    pub(crate) fn from_engine(inner: &'a wk::ScriptDialog) -> Self {
-        Self { inner }
-    }
-
-    /// Which kind of dialog was requested.
-    pub fn kind(&self) -> ScriptDialogKind {
-        match self.inner.dialog_type() {
-            wk::ScriptDialogType::Confirm => ScriptDialogKind::Confirm,
-            wk::ScriptDialogType::Prompt => ScriptDialogKind::Prompt,
-            wk::ScriptDialogType::BeforeUnloadConfirm => ScriptDialogKind::BeforeUnloadConfirm,
-            _ => ScriptDialogKind::Alert,
-        }
-    }
-
-    /// The dialog message text.
-    pub fn message(&self) -> String {
-        self.inner.message().unwrap_or_default().to_string()
-    }
-
-    /// The default text of a `prompt` dialog, if any.
-    pub fn prompt_default_text(&self) -> Option<String> {
-        self.inner
-            .prompt_get_default_text()
-            .map(|t| t.to_string())
-    }
-
-    /// Answer a `prompt` dialog with text.
-    pub fn set_prompt_text(&self, text: &str) {
-        self.inner.prompt_set_text(text);
-    }
-
-    /// Answer a `confirm` or before-unload dialog.
-    pub fn set_confirmed(&self, confirmed: bool) {
-        self.inner.confirm_set_confirmed(confirmed);
-    }
-}
-
 /// Backend-neutral script dialog passed to
-/// [`WebViewDelegate::script_dialog`] when the GTK backend is disabled.
+/// [`WebViewDelegate::script_dialog`].
 ///
 /// Carries the dialog kind, message and prompt default; answers are sent
 /// back to the out-of-process engine by the view.
-#[cfg(not(feature = "gtk-backend"))]
 pub struct ScriptDialogRef {
     kind: ScriptDialogKind,
     message: String,
@@ -134,7 +82,6 @@ pub struct ScriptDialogRef {
     prompt_text: std::cell::Cell<Option<String>>,
 }
 
-#[cfg(not(feature = "gtk-backend"))]
 impl ScriptDialogRef {
     /// Create a dialog description (used by the engine IPC layer).
     pub fn new(
@@ -183,7 +130,7 @@ impl ScriptDialogRef {
 }
 
 /// What a page can ask permission for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionKind {
     /// Camera access.
     Camera,

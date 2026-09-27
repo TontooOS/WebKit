@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::{Receiver, sync_channel};
 
+use foundation::serialization::JsonValue;
 use webkit::cookie::Cookie;
 use webkit::engine::{EngineCommand, EngineEvent, SharedFrame};
 use webkit::transport::{CMD_PREFIX, EVENT_PREFIX, FRAME_FILE};
@@ -32,7 +33,7 @@ struct Emitter {
 
 impl Emitter {
     fn emit(&mut self, event: &EngineEvent) {
-        let mut line = serde_json::to_string(event).unwrap_or_else(|_| "{}".into());
+        let mut line = event.to_json_string();
         line.insert_str(0, EVENT_PREFIX);
         line.push('\n');
         let _ = self.out.write_all(line.as_bytes());
@@ -147,7 +148,7 @@ impl Renderer for MockRenderer {
             EngineCommand::EvaluateJs { id, .. } => {
                 emit.emit(&EngineEvent::JsResult {
                     id,
-                    result: serde_json::Value::Null,
+                    result: JsonValue::Null,
                 });
             }
             EngineCommand::Resize { width, height, .. } => {
@@ -356,7 +357,7 @@ impl Renderer for ChromiumRenderer {
                         eprintln!("chromium: evaluate failed ({e})");
                         emit.emit(&EngineEvent::JsResult {
                             id,
-                            result: serde_json::Value::Null,
+                            result: JsonValue::Null,
                         });
                     }
                 }
@@ -626,7 +627,7 @@ fn main() {
             let Some(payload) = line.strip_prefix(CMD_PREFIX) else {
                 continue;
             };
-            match serde_json::from_str::<EngineCommand>(payload) {
+            match EngineCommand::from_json_str(payload) {
                 Ok(command) => {
                     if cmd_tx.try_send(command).is_err() {
                         break;

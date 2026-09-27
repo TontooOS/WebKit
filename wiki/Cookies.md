@@ -1,40 +1,43 @@
 # Cookies
 
 Cookie management for TontooWebKit, the equivalent of `WKHTTPCookieStore`
-in Apple WebKit. The `CookieManager` controls which cookies the engine
-accepts, reads and writes individual cookies and selects the persistent
-storage format.
+in Apple WebKit. Cookies live in the engine store; the view reads and
+writes them through blocking calls.
 
 ## Rules
 
-- The manager is obtained per view (`WebView::cookie_manager`); views that
-  share a network session share one cookie store.
-- `set_accept_policy` applies immediately to every request of the session.
-- The read/write methods block on the GLib main context; call them from the
-  main thread only.
+- `CookieAcceptPolicy` selects which cookies the engine accepts.
+- The read/write calls block while pumping engine events; call them from
+  a worker thread, not the UI thread.
 - Cookie persistence is part of the data store: ephemeral (private)
   sessions never write cookies to disk. See [DataStore.md](DataStore.md).
 
-## Constructors
-
-### `WebView::cookie_manager`
-
-```rust
-pub fn cookie_manager(&self) -> Option<CookieManager>
-```
-
-Returns the cookie manager of the view's network session, or `None` when
-the engine has no session attached yet.
-
 ## API
 
-### `CookieManager::set_accept_policy`
+### `WebView::list_cookies`
 
 ```rust
-pub fn set_accept_policy(&self, policy: CookieAcceptPolicy)
+pub fn list_cookies(&self) -> Result<Vec<Cookie>, WebKitError>
 ```
 
-Sets which cookies are accepted. Applies immediately.
+Returns every cookie in the store. Returns `Err` when the engine call
+fails.
+
+### `WebView::add_cookie`
+
+```rust
+pub fn add_cookie(&self, cookie: &Cookie)
+```
+
+Adds or updates a cookie. Cookies without an expiry are session cookies.
+
+### `WebView::delete_cookie`
+
+```rust
+pub fn delete_cookie(&self, domain: &str, path: &str, name: &str)
+```
+
+Deletes the cookie matching domain, path and name.
 
 ### `CookieAcceptPolicy`
 
@@ -44,56 +47,7 @@ Sets which cookies are accepted. Applies immediately.
 | `NoThirdParty` | Reject third-party cookies |
 | `Never` | Reject all cookies |
 
-### `CookieManager::accept_policy`
-
-```rust
-pub fn accept_policy(&self) -> Result<CookieAcceptPolicy, WebKitError>
-```
-
-Returns the current accept policy. Returns `Err` when the engine call
-fails.
-
-### `CookieManager::all_cookies`
-
-```rust
-pub fn all_cookies(&self) -> Result<Vec<Cookie>, WebKitError>
-```
-
-Returns every cookie in the store. Returns `Err` when the engine call
-fails.
-
-### `CookieManager::cookies_for_uri`
-
-```rust
-pub fn cookies_for_uri(&self, uri: &str) -> Result<Vec<Cookie>, WebKitError>
-```
-
-Returns all cookies that would be sent for a URI.
-
-### `CookieManager::add_cookie`
-
-```rust
-pub fn add_cookie(&self, cookie: &Cookie) -> Result<(), WebKitError>
-```
-
-Adds or updates a cookie. Cookies without an expiry are session cookies.
-
-### `CookieManager::delete_cookie`
-
-```rust
-pub fn delete_cookie(&self, domain: &str, path: &str, name: &str) -> Result<(), WebKitError>
-```
-
-Deletes the cookie matching domain, path and name.
-
-### `CookieManager::set_persistent_storage`
-
-```rust
-pub fn set_persistent_storage(&self, filename: &str, storage: CookieStorage)
-```
-
-Stores cookies in the given file. Call it before the first web view of the
-session is created so every cookie is persisted.
+### `CookieStorage`
 
 | Variant | Behavior |
 |---|---|
@@ -117,21 +71,17 @@ Builder methods: `Cookie::new(name, value, domain)`, `.path(...)`,
 ## Usage / Example
 
 ```rust,no_run
-use webkit::{Cookie, CookieAcceptPolicy, CookieStorage, WebKitConfiguration, WebView};
+use webkit::{Cookie, WebKitConfiguration, WebView};
 
 let web_view = WebView::new(
     WebKitConfiguration::new().start_url("https://example.com"),
 ).unwrap();
 
-if let Some(cookies) = web_view.cookie_manager() {
-    cookies.set_accept_policy(CookieAcceptPolicy::NoThirdParty);
-    cookies.set_persistent_storage("/tmp/cookies.txt", CookieStorage::Text);
-
-    let _ = cookies.add_cookie(Cookie::new("session", "abc", "example.com"));
-    for cookie in cookies.all_cookies().unwrap_or_default() {
-        println!("{}={}", cookie.name, cookie.value);
-    }
+web_view.add_cookie(&Cookie::new("session", "abc", "example.com"));
+for cookie in web_view.list_cookies().unwrap_or_default() {
+    println!("{}={}", cookie.name, cookie.value);
 }
+web_view.delete_cookie("example.com", "/", "session");
 ```
 
 ## Cross References

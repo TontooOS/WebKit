@@ -2,20 +2,8 @@
 //! WebKit.
 //!
 //! [`Cookie`], [`CookieAcceptPolicy`] and [`CookieStorage`] are
-//! backend-neutral. [`CookieManager`] needs the `gtk-backend` feature;
-//! the out-of-process engine manages cookies in its helper process.
-
-#[cfg(feature = "gtk-backend")]
-use webkit6 as wk;
-#[cfg(feature = "gtk-backend")]
-use webkit6::prelude::*;
-
-#[cfg(feature = "gtk-backend")]
-use crate::error::WebKitError;
-#[cfg(feature = "gtk-backend")]
-use crate::web_view::WebView;
-
-use serde::{Deserialize, Serialize};
+//! backend-neutral. The out-of-process engine manages cookies in its
+//! helper process.
 
 /// Which cookies the engine accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,25 +16,7 @@ pub enum CookieAcceptPolicy {
     Never,
 }
 
-impl CookieAcceptPolicy {
-    #[cfg(feature = "gtk-backend")]
-    fn to_engine(self) -> wk::CookieAcceptPolicy {
-        match self {
-            CookieAcceptPolicy::Always => wk::CookieAcceptPolicy::Always,
-            CookieAcceptPolicy::NoThirdParty => wk::CookieAcceptPolicy::NoThirdParty,
-            CookieAcceptPolicy::Never => wk::CookieAcceptPolicy::Never,
-        }
-    }
 
-    #[cfg(feature = "gtk-backend")]
-    fn from_engine(policy: wk::CookieAcceptPolicy) -> Self {
-        match policy {
-            wk::CookieAcceptPolicy::Never => CookieAcceptPolicy::Never,
-            wk::CookieAcceptPolicy::NoThirdParty => CookieAcceptPolicy::NoThirdParty,
-            _ => CookieAcceptPolicy::Always,
-        }
-    }
-}
 
 /// Persistent cookie storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,18 +27,8 @@ pub enum CookieStorage {
     Sqlite,
 }
 
-impl CookieStorage {
-    #[cfg(feature = "gtk-backend")]
-    fn to_engine(self) -> wk::CookiePersistentStorage {
-        match self {
-            CookieStorage::Text => wk::CookiePersistentStorage::Text,
-            CookieStorage::Sqlite => wk::CookiePersistentStorage::Sqlite,
-        }
-    }
-}
-
 /// A single HTTP cookie.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Cookie {
     /// Cookie name.
     pub name: String,
@@ -116,103 +76,45 @@ impl Cookie {
     }
 }
 
-/// The cookie store backing a GTK web view's network session.
-///
-/// Only available with the `gtk-backend` feature.
-#[cfg(feature = "gtk-backend")]
-pub struct CookieManager {
-    inner: wk::CookieManager,
-}
-
-#[cfg(feature = "gtk-backend")]
-impl CookieManager {
-    /// Take the cookie manager of a web view's network session.
-    ///
-    /// Returns `None` when the engine has no session attached yet.
-    pub fn from_view(view: &WebView) -> Option<Self> {
-        view.inner()
-            .network_session()
-            .and_then(|session| session.cookie_manager())
-            .map(|inner| Self { inner })
+impl Cookie {
+    /// Render as a JSON object for engine IPC.
+    pub fn to_json_value(&self) -> foundation::serialization::JsonValue {
+        use foundation::serialization::JsonValue;
+        JsonValue::Object(vec![
+            ("name".to_string(), JsonValue::Str(self.name.clone())),
+            ("value".to_string(), JsonValue::Str(self.value.clone())),
+            ("domain".to_string(), JsonValue::Str(self.domain.clone())),
+            ("path".to_string(), JsonValue::Str(self.path.clone())),
+            ("secure".to_string(), JsonValue::Bool(self.secure)),
+            ("httpOnly".to_string(), JsonValue::Bool(self.http_only)),
+        ])
     }
 
-    /// Set which cookies are accepted. Applies immediately to every
-    /// request of the session.
-    pub fn set_accept_policy(&self, policy: CookieAcceptPolicy) {
-        self.inner.set_accept_policy(policy.to_engine());
-    }
-
-    /// The current accept policy.
-    pub fn accept_policy(&self) -> Result<CookieAcceptPolicy, WebKitError> {
-        let future = self.inner.accept_policy_future();
-        let policy = block(future)?;
-        Ok(CookieAcceptPolicy::from_engine(policy))
-    }
-
-    /// Every cookie in the store.
-    pub fn all_cookies(&self) -> Result<Vec<Cookie>, WebKitError> {
-        let future = self.inner.all_cookies_future();
-        let mut cookies = block(future)?;
-        Ok(cookies.iter_mut().map(cookie_from_soup).collect())
-    }
-
-    /// All cookies that would be sent for a URI.
-    pub fn cookies_for_uri(&self, uri: &str) -> Result<Vec<Cookie>, WebKitError> {
-        let future = self.inner.cookies_future(uri);
-        let mut cookies = block(future)?;
-        Ok(cookies.iter_mut().map(cookie_from_soup).collect())
-    }
-
-    /// Add or update a cookie in the store.
-    pub fn add_cookie(&self, cookie: &Cookie) -> Result<(), WebKitError> {
-        let mut soup_cookie = soup::Cookie::new(
-            &cookie.name,
-            &cookie.value,
-            &cookie.domain,
-            &cookie.path,
-            -1,
-        );
-        soup_cookie.set_secure(cookie.secure);
-        soup_cookie.set_http_only(cookie.http_only);
-        let future = self.inner.add_cookie_future(&soup_cookie);
-        block(future)
-    }
-
-    /// Delete the cookie matching domain, path and name.
-    pub fn delete_cookie(
-        &self,
-        domain: &str,
-        path: &str,
-        name: &str,
-    ) -> Result<(), WebKitError> {
-        let cookie = soup::Cookie::new(name, "", domain, path, -1);
-        let future = self.inner.delete_cookie_future(&cookie);
-        block(future)
-    }
-
-    /// Store cookies persistently in the given file. Call before the
-    /// first web view of the session is created for the setting to apply
-    /// to every cookie.
-    pub fn set_persistent_storage(&self, filename: &str, storage: CookieStorage) {
-        self.inner.set_persistent_storage(filename, storage.to_engine());
-    }
-}
-
-#[cfg(feature = "gtk-backend")]
-fn block<T>(future: impl std::future::Future<Output = Result<T, glib::Error>>) -> Result<T, WebKitError> {
-    glib::MainContext::default()
-        .block_on(future)
-        .map_err(|e| WebKitError::Engine(e.to_string()))
-}
-
-#[cfg(feature = "gtk-backend")]
-fn cookie_from_soup(c: &mut soup::Cookie) -> Cookie {
-    Cookie {
-        name: c.name().unwrap_or_default().to_string(),
-        value: c.value().unwrap_or_default().to_string(),
-        domain: c.domain().unwrap_or_default().to_string(),
-        path: c.path().unwrap_or_default().to_string(),
-        secure: c.is_secure(),
-        http_only: c.is_http_only(),
+    /// Parse from a JSON object (missing fields default like serde did).
+    pub fn from_json_value(doc: &foundation::serialization::JsonValue) -> Self {
+        let str_field = |key: &str| {
+            doc.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let bool_field = |key: &str| {
+            doc.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+        };
+        Self {
+            name: str_field("name"),
+            value: str_field("value"),
+            domain: str_field("domain"),
+            path: {
+                let path = str_field("path");
+                if path.is_empty() {
+                    "/".to_string()
+                } else {
+                    path
+                }
+            },
+            secure: bool_field("secure"),
+            http_only: bool_field("httpOnly"),
+        }
     }
 }

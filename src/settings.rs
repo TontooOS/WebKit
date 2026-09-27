@@ -1,17 +1,8 @@
 //! Per-web-view engine settings, the equivalent of `WKWebViewConfiguration`
 //! prefs in Apple WebKit.
-//!
-//! A [`WebSettings`] value is serializable so it can be stored, passed
-//! through the C FFI as JSON, or persisted as an app preference.
-
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "gtk-backend")]
-use webkit6 as wk;
 
 /// How automatic media playback is handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AutoPlay {
     /// Media may play without any user interaction.
     #[default]
@@ -23,8 +14,7 @@ pub enum AutoPlay {
 }
 
 /// How aggressively the engine caches web content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheModel {
     /// Minimal caching (document viewers, single-page apps).
     DocumentViewer,
@@ -36,8 +26,7 @@ pub enum CacheModel {
 }
 
 /// Mutable engine settings applied to every new [`crate::WebView`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct WebSettings {
     /// Custom user agent string. `None` lets the engine pick a default.
     pub user_agent: Option<String>,
@@ -115,64 +104,88 @@ impl WebSettings {
     pub fn builder() -> WebSettingsBuilder {
         WebSettingsBuilder::default()
     }
-
-    /// Map the cache model onto the GTK engine's context-level cache model.
-    #[cfg(feature = "gtk-backend")]
-    pub(crate) fn engine_cache_model(&self) -> wk::CacheModel {
-        match self.cache_model {
-            CacheModel::DocumentViewer => wk::CacheModel::DocumentViewer,
-            CacheModel::WebBrowser | CacheModel::PrimaryWebBrowser => wk::CacheModel::WebBrowser,
-        }
-    }
-
-    #[cfg(feature = "gtk-backend")]
-    pub(crate) fn apply_to(&self, s: &wk::Settings) {
-        s.set_enable_javascript(self.javascript_enabled);
-        s.set_enable_developer_extras(self.developer_extras);
-        s.set_enable_webgl(self.webgl_enabled);
-        s.set_enable_webaudio(self.webaudio_enabled);
-        s.set_enable_media(self.media_enabled);
-        s.set_enable_media_stream(self.media_stream_enabled);
-        s.set_enable_fullscreen(self.fullscreen_enabled);
-        s.set_enable_back_forward_navigation_gestures(self.back_forward_navigation_gestures);
-        s.set_javascript_can_open_windows_automatically(self.javascript_can_open_windows);
-        s.set_allow_modal_dialogs(self.allow_modal_dialogs);
-        s.set_user_agent(self.user_agent.as_deref());
-        s.set_disable_web_security(self.disable_web_security);
-
-        // Performance-relevant engine switches.
-        s.set_enable_page_cache(self.page_cache);
-        s.set_enable_smooth_scrolling(self.smooth_scrolling);
-        s.set_enable_dns_prefetching(self.dns_prefetching);
-        s.set_hardware_acceleration_policy(if self.hardware_acceleration {
-            wk::HardwareAccelerationPolicy::Always
-        } else {
-            wk::HardwareAccelerationPolicy::Never
-        });
-
-        match self.auto_play {
-            AutoPlay::Allow => {}
-            AutoPlay::RequireUserGesture => {
-                s.set_media_playback_requires_user_gesture(true);
-            }
-            AutoPlay::AllowSilent => {
-                s.set_media_playback_allows_inline(true);
-                s.set_media_playback_requires_user_gesture(true);
-            }
-        }
-
-        if let Some(family) = &self.default_font_family {
-            s.set_default_font_family(family);
-        }
-        if let Some(size) = self.default_font_size {
-            s.set_default_font_size(size);
-        }
-    }
 }
 
 impl Default for WebSettings {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl WebSettings {
+    /// Parse from a JSON object. Missing fields fall back to [`WebSettings::new`]
+    /// defaults (matching the former serde behavior).
+    pub fn from_json_value(
+        doc: &foundation::serialization::JsonValue,
+    ) -> Result<Self, String> {
+        use foundation::serialization::JsonValue;
+        let defaults = Self::new();
+        let opt_str = |key: &str| match doc.get(key) {
+            None | Some(JsonValue::Null) => Ok(None),
+            Some(JsonValue::Str(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(format!("field `{}` has the wrong type", key)),
+        };
+        let boolean = |key: &str, fallback: bool| match doc.get(key) {
+            None | Some(JsonValue::Null) => Ok(fallback),
+            Some(JsonValue::Bool(b)) => Ok(*b),
+            Some(_) => Err(format!("field `{}` has the wrong type", key)),
+        };
+        let opt_u32 = |key: &str| match doc.get(key) {
+            None | Some(JsonValue::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .map(Some)
+                .ok_or_else(|| format!("field `{}` has the wrong type", key)),
+        };
+        let auto_play = match doc.get("auto_play").and_then(|v| v.as_str()) {
+            None => defaults.auto_play,
+            Some("allow") => AutoPlay::Allow,
+            Some("require_user_gesture") => AutoPlay::RequireUserGesture,
+            Some("allow_silent") => AutoPlay::AllowSilent,
+            Some(other) => return Err(format!("unknown auto_play `{}`", other)),
+        };
+        let cache_model = match doc.get("cache_model").and_then(|v| v.as_str()) {
+            None => defaults.cache_model,
+            Some("document_viewer") => CacheModel::DocumentViewer,
+            Some("web_browser") => CacheModel::WebBrowser,
+            Some("primary_web_browser") => CacheModel::PrimaryWebBrowser,
+            Some(other) => return Err(format!("unknown cache_model `{}`", other)),
+        };
+        Ok(Self {
+            user_agent: opt_str("user_agent")?.or(defaults.user_agent),
+            javascript_enabled: boolean("javascript_enabled", defaults.javascript_enabled)?,
+            developer_extras: boolean("developer_extras", defaults.developer_extras)?,
+            webgl_enabled: boolean("webgl_enabled", defaults.webgl_enabled)?,
+            webaudio_enabled: boolean("webaudio_enabled", defaults.webaudio_enabled)?,
+            media_enabled: boolean("media_enabled", defaults.media_enabled)?,
+            media_stream_enabled: boolean(
+                "media_stream_enabled",
+                defaults.media_stream_enabled,
+            )?,
+            fullscreen_enabled: boolean("fullscreen_enabled", defaults.fullscreen_enabled)?,
+            back_forward_navigation_gestures: boolean(
+                "back_forward_navigation_gestures",
+                defaults.back_forward_navigation_gestures,
+            )?,
+            javascript_can_open_windows: boolean(
+                "javascript_can_open_windows",
+                defaults.javascript_can_open_windows,
+            )?,
+            allow_modal_dialogs: boolean("allow_modal_dialogs", defaults.allow_modal_dialogs)?,
+            auto_play,
+            cache_model,
+            page_cache: boolean("page_cache", defaults.page_cache)?,
+            smooth_scrolling: boolean("smooth_scrolling", defaults.smooth_scrolling)?,
+            dns_prefetching: boolean("dns_prefetching", defaults.dns_prefetching)?,
+            hardware_acceleration: boolean(
+                "hardware_acceleration",
+                defaults.hardware_acceleration,
+            )?,
+            default_font_family: opt_str("default_font_family")?,
+            default_font_size: opt_u32("default_font_size")?,
+            disable_web_security: boolean("disable_web_security", defaults.disable_web_security)?,
+        })
     }
 }
 

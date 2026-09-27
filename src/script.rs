@@ -4,16 +4,10 @@
 //! document start or document end. A [`ScriptMessageHandler`] registers a
 //! named channel: JavaScript calls
 //! `window.webkit.messageHandlers.<name>.postMessage(payload)` and the
-//! payload arrives as a `serde_json::Value` in Rust.
-
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "gtk-backend")]
-use webkit6 as wk;
+//! payload arrives as a Foundation `JsonValue` in Rust.
 
 /// When a user script is injected into the document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScriptInjectionTime {
     /// Injected before the document is parsed.
     AtDocumentStart,
@@ -23,8 +17,7 @@ pub enum ScriptInjectionTime {
 }
 
 /// Which frames receive the user script.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScriptFrameInjection {
     /// Inject into the top frame only.
     #[default]
@@ -34,8 +27,7 @@ pub enum ScriptFrameInjection {
 }
 
 /// A user script injected into loaded pages.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, Default)]
 pub struct WebScript {
     /// The JavaScript source code.
     pub source: String,
@@ -85,27 +77,6 @@ impl WebScript {
         self.block_list = urls;
         self
     }
-
-    #[cfg(feature = "gtk-backend")]
-    pub(crate) fn to_user_script(&self) -> wk::UserScript {
-        let injected_frames = match self.frames {
-            ScriptFrameInjection::TopFrame => wk::UserContentInjectedFrames::TopFrame,
-            ScriptFrameInjection::AllFrames => wk::UserContentInjectedFrames::AllFrames,
-        };
-        let injection_time = match self.injection_time {
-            ScriptInjectionTime::AtDocumentStart => wk::UserScriptInjectionTime::Start,
-            ScriptInjectionTime::AtDocumentEnd => wk::UserScriptInjectionTime::End,
-        };
-        let allow_list: Vec<&str> = self.allow_list.iter().map(String::as_str).collect();
-        let block_list: Vec<&str> = self.block_list.iter().map(String::as_str).collect();
-        wk::UserScript::new(
-            &self.source,
-            injected_frames,
-            injection_time,
-            &allow_list,
-            &block_list,
-        )
-    }
 }
 
 /// A named JavaScript-to-Rust message channel.
@@ -128,13 +99,13 @@ pub struct ScriptMessageHandler {
     /// Name of the channel (must match the JavaScript handler name).
     pub name: String,
     /// Called with the JSON payload whenever the page posts a message.
-    pub body: Box<dyn Fn(serde_json::Value) + 'static>,
+    pub body: Box<dyn Fn(foundation::serialization::JsonValue) + 'static>,
 }
 
 impl ScriptMessageHandler {
     pub fn new(
         name: impl Into<String>,
-        body: impl Fn(serde_json::Value) + 'static,
+        body: impl Fn(foundation::serialization::JsonValue) + 'static,
     ) -> Self {
         Self {
             name: name.into(),

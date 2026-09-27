@@ -11,7 +11,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int, c_void};
 use std::sync::Mutex;
 
-use serde::{Deserialize, Serialize};
+use foundation::serialization::JsonValue;
 
 use crate::config::WebKitConfiguration;
 use crate::delegate::WebViewDelegate;
@@ -23,31 +23,57 @@ use crate::view::WebView;
 pub struct TontooVelloView {
     view: WebView,
     last_seq: u64,
-    messages: Mutex<Vec<(String, serde_json::Value)>>,
+    messages: Mutex<Vec<(String, JsonValue)>>,
 }
 
-/// Parsed Vello FFI configuration (subset of the GTK JSON config).
-#[derive(Debug, Default, Deserialize, Serialize)]
+/// Parsed Vello FFI configuration.
+#[derive(Debug, Default)]
 struct VelloConfig {
-    #[serde(default)]
     start_url: Option<String>,
-    #[serde(default)]
     settings: Option<WebSettings>,
-    #[serde(default)]
     private_browsing: bool,
-    #[serde(default)]
     spawn_engine: bool,
 }
 
+impl VelloConfig {
+    fn parse(json: &str) -> Result<Self, WebKitError> {
+        let doc = JsonValue::parse(json)
+            .map_err(|e| WebKitError::Engine(format!("invalid config: {e}")))?;
+        Self::from_json_value(&doc)
+    }
+
+    fn from_json_value(doc: &JsonValue) -> Result<Self, WebKitError> {
+        let settings = match doc.get("settings") {
+            None | Some(JsonValue::Null) => None,
+            Some(obj) => Some(WebSettings::from_json_value(obj).map_err(WebKitError::Engine)?),
+        };
+        Ok(Self {
+            start_url: doc
+                .get("start_url")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            settings,
+            private_browsing: doc
+                .get("private_browsing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            spawn_engine: doc
+                .get("spawn_engine")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
+    }
+}
+
 struct PollDelegate {
-    messages: *const Mutex<Vec<(String, serde_json::Value)>>,
+    messages: *const Mutex<Vec<(String, JsonValue)>>,
 }
 
 // SAFETY: the mutex outlives the view; only the UI thread calls into it.
 unsafe impl Send for PollDelegate {}
 
 impl WebViewDelegate for PollDelegate {
-    fn script_message(&mut self, name: &str, body: serde_json::Value) {
+    fn script_message(&mut self, name: &str, body: JsonValue) {
         if let Some(queue) = unsafe { self.messages.as_ref() } {
             queue
                 .lock()
@@ -72,7 +98,7 @@ fn set_error(out: *mut *mut c_char, message: &str) {
 }
 
 fn parse_config(json: &str) -> Result<VelloConfig, WebKitError> {
-    serde_json::from_str(json).map_err(|e| WebKitError::Engine(format!("invalid config: {e}")))
+    VelloConfig::parse(json)
 }
 
 fn handle(view: *mut TontooVelloView) -> Option<&'static TontooVelloView> {
@@ -144,7 +170,7 @@ pub unsafe extern "C" fn tontoo_vello_view_new(
         last_seq: u64::MAX,
         messages: Mutex::new(Vec::new()),
     });
-    let messages_ptr: *const Mutex<Vec<(String, serde_json::Value)>> =
+    let messages_ptr: *const Mutex<Vec<(String, JsonValue)>> =
         std::ptr::from_ref(&handle.messages);
     handle.view.set_delegate(Box::new(PollDelegate {
         messages: messages_ptr,
@@ -464,7 +490,7 @@ pub unsafe extern "C" fn tontoo_vello_view_evaluate_javascript(
         }
     };
     match h.view.evaluate_javascript(script) {
-        Ok(json) => cstring_ptr(&json.to_string()),
+        Ok(json) => cstring_ptr(&json.to_compact_string()),
         Err(e) => {
             set_error(error_out, &e.to_string());
             std::ptr::null_mut()
@@ -498,7 +524,7 @@ pub unsafe extern "C" fn tontoo_vello_view_poll_script_message(
         *name_out = cstring_ptr(&name);
     }
     if !body_json_out.is_null() {
-        *body_json_out = cstring_ptr(&body.to_string());
+        *body_json_out = cstring_ptr(&body.to_compact_string());
     }
     1
 }

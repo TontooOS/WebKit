@@ -1,9 +1,6 @@
 //! Navigation state and policy decisions, the equivalent of
 //! `WKNavigationDelegate` in Apple WebKit.
 
-#[cfg(feature = "gtk-backend")]
-use webkit6 as wk;
-
 /// A phase in the page load lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavigationEvent {
@@ -72,14 +69,3 @@ pub trait WebNavigationDelegate {
 pub struct DefaultWebNavigationDelegate;
 
 impl WebNavigationDelegate for DefaultWebNavigationDelegate {}
-
-#[cfg(feature = "gtk-backend")]
-pub(crate) fn load_event_to_navigation(event: &wk::LoadEvent) -> NavigationEvent {
-    match event {
-        wk::LoadEvent::Started => NavigationEvent::Started,
-        wk::LoadEvent::Redirected => NavigationEvent::Redirected,
-        wk::LoadEvent::Committed => NavigationEvent::Committed,
-        wk::LoadEvent::Finished => NavigationEvent::Finished,
-        _ => NavigationEvent::Failed,
-    }
-}

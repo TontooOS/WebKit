@@ -271,7 +271,7 @@ impl ProcessEngine {
                 let Some(payload) = line.strip_prefix(EVENT_PREFIX) else {
                     continue;
                 };
-                let Ok(event) = serde_json::from_str::<EngineEvent>(payload) else {
+                let Ok(event) = EngineEvent::from_json_str(payload) else {
                     continue;
                 };
                 if let EngineEvent::FrameReady { seq, width, height } = &event {
@@ -306,7 +306,7 @@ impl Drop for ProcessEngine {
 
 impl WebEngine for ProcessEngine {
     fn send(&self, command: EngineCommand) {
-        let mut line = serde_json::to_string(&command).unwrap_or_else(|_| "{}".into());
+        let mut line = command.to_json_string();
         line.insert_str(0, CMD_PREFIX);
         line.push('\n');
         if let Ok(mut stdin) = self.stdin.lock() {
@@ -332,12 +332,27 @@ mod tests {
     fn event_lines_parse() {
         let line = r#"E {"LoadFinished":"https://example.com"}"#;
         let payload = line.strip_prefix(EVENT_PREFIX).unwrap();
-        let event: EngineEvent = serde_json::from_str(payload).unwrap();
+        let event = EngineEvent::from_json_str(payload).unwrap();
         assert!(matches!(event, EngineEvent::LoadFinished(_)));
         let line = r#"E {"JsResult":{"id":3,"result":null}}"#;
         let payload = line.strip_prefix(EVENT_PREFIX).unwrap();
-        let event: EngineEvent = serde_json::from_str(payload).unwrap();
+        let event = EngineEvent::from_json_str(payload).unwrap();
         assert!(matches!(event, EngineEvent::JsResult { id: 3, .. }));
+    }
+
+    #[test]
+    fn command_lines_roundtrip() {
+        let cmd = EngineCommand::Resize { width: 800, height: 600, scale: 1.0 };
+        let back = EngineCommand::from_json_str(&cmd.to_json_string()).unwrap();
+        assert!(matches!(back, EngineCommand::Resize { width: 800, height: 600, .. }));
+        for unit in [
+            EngineCommand::Reload,
+            EngineCommand::GoBack,
+            EngineCommand::Stop,
+        ] {
+            let back = EngineCommand::from_json_str(&unit.to_json_string()).unwrap();
+            assert_eq!(format!("{:?}", back), format!("{:?}", unit));
+        }
     }
 
     #[test]

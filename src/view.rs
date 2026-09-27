@@ -1,8 +1,7 @@
 //! The backend-neutral [`WebView`], the equivalent of `WKWebView` in
 //! Apple WebKit.
 //!
-//! Unlike the legacy GTK view (`crate::web_view`, feature `gtk-backend`),
-//! this view owns no widget. It drives a [`crate::engine::WebEngine`]
+//! This view owns no widget. It drives a [`crate::engine::WebEngine`]
 //! (WPE WebKit out-of-process once `tontoo-webengine` lands,
 //! [`crate::engine::MockEngine`] until then) and exposes the latest
 //! [`crate::engine::SharedFrame`] for texture blitting into TontooUI
@@ -26,11 +25,12 @@ use crate::error::WebKitError;
 use crate::navigation::{DefaultWebNavigationDelegate, WebNavigationDelegate};
 use crate::script::ScriptMessageHandler;
 use crate::settings::WebSettings;
+use foundation::serialization::JsonValue;
 
 /// How long [`WebView::evaluate_javascript`] and [`WebView::list_cookies`]
 /// wait for the engine answer while pumping events.
 ///
-/// Blocking matches the legacy GTK behavior (which blocked indefinitely);
+/// Blocking matches the legacy behavior (which blocked indefinitely);
 /// slow first-starts (cold browser, software rendering) need the headroom.
 /// Prefer a future async API for latency-sensitive UI code.
 pub const JS_TIMEOUT: Duration = Duration::from_secs(60);
@@ -51,7 +51,7 @@ pub struct WebView {
     can_forward: RefCell<bool>,
     zoom: RefCell<f64>,
     next_js_id: Cell<u64>,
-    pending_js: RefCell<HashMap<u64, SyncSender<serde_json::Value>>>,
+    pending_js: RefCell<HashMap<u64, SyncSender<JsonValue>>>,
     pending_cookies: RefCell<HashMap<u64, SyncSender<Vec<Cookie>>>>,
 }
 
@@ -466,13 +466,13 @@ impl WebView {
     pub fn evaluate_javascript(
         &self,
         script: &str,
-    ) -> Result<serde_json::Value, WebKitError> {
+    ) -> Result<JsonValue, WebKitError> {
         if let Some(value) = self.engine.eval_sync(script) {
             return Ok(value);
         }
         let id = self.next_js_id.get();
         self.next_js_id.set(id.wrapping_add(1).max(1));
-        let (tx, rx) = sync_channel::<serde_json::Value>(1);
+        let (tx, rx) = sync_channel::<JsonValue>(1);
         self.pending_js.borrow_mut().insert(id, tx);
         self.engine.send(EngineCommand::EvaluateJs {
             id,
@@ -664,7 +664,7 @@ mod tests {
     impl WebEngine for PumpEngine {
         fn send(&self, command: EngineCommand) {
             if let EngineCommand::EvaluateJs { id, script } = command {
-                let result = serde_json::Value::String(format!("echo:{script}"));
+                let result = JsonValue::Str(format!("echo:{script}"));
                 self.pending
                     .lock()
                     .unwrap()
@@ -689,7 +689,7 @@ mod tests {
         });
         let view = WebView::with_engine(WebKitConfiguration::new(), engine).unwrap();
         let result = view.evaluate_javascript("1+1").unwrap();
-        assert_eq!(result, serde_json::Value::String("echo:1+1".into()));
+        assert_eq!(result, JsonValue::Str("echo:1+1".into()));
     }
 
     #[test]

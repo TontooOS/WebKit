@@ -1,18 +1,11 @@
 //! Website data storage, the equivalent of `WKWebsiteDataStore` in Apple
 //! WebKit.
 //!
-//! [`WebsiteDataType`] is backend-neutral. [`WebsiteDataStore`] needs the
-//! `gtk-backend` feature; the out-of-process engine owns its data store in
-//! the helper process.
-
-#[cfg(feature = "gtk-backend")]
-use glib::translate::ToGlibPtr;
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "gtk-backend")]
-use webkit6 as wk;
+//! [`WebsiteDataType`] is backend-neutral. The out-of-process engine owns
+//! its data store in the helper process.
 
 /// A subset of website data that can be inspected or cleared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebsiteDataType {
     pub memory_cache: bool,
     pub disk_cache: bool,
@@ -83,48 +76,6 @@ impl WebsiteDataType {
             ..Self::none()
         }
     }
-
-    #[cfg(feature = "gtk-backend")]
-    pub(crate) fn as_ffi(&self) -> webkit6_sys::WebKitWebsiteDataTypes {
-        let mut bits = 0;
-        if self.memory_cache {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_MEMORY_CACHE;
-        }
-        if self.disk_cache {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_DISK_CACHE;
-        }
-        if self.offline_application_cache {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE;
-        }
-        if self.session_storage {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_SESSION_STORAGE;
-        }
-        if self.local_storage {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_LOCAL_STORAGE;
-        }
-        if self.indexeddb_databases {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_INDEXEDDB_DATABASES;
-        }
-        if self.cookies {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_COOKIES;
-        }
-        if self.device_id_hash_salt {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_DEVICE_ID_HASH_SALT;
-        }
-        if self.hsts_cache {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_HSTS_CACHE;
-        }
-        if self.itp {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_ITP;
-        }
-        if self.service_worker_registrations {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_SERVICE_WORKER_REGISTRATIONS;
-        }
-        if self.dom_cache {
-            bits |= webkit6_sys::WEBKIT_WEBSITE_DATA_DOM_CACHE;
-        }
-        bits
-    }
 }
 
 /// A snapshot of stored website data.
@@ -134,114 +85,4 @@ pub struct WebsiteData {
     pub types: WebsiteDataType,
     /// Estimated size in bytes.
     pub size: u64,
-}
-
-/// The website data store backing a GTK [`crate::WebView`].
-///
-/// Only available with the `gtk-backend` feature.
-#[cfg(feature = "gtk-backend")]
-#[derive(Debug, Clone)]
-pub struct WebsiteDataStore {
-    manager: wk::WebsiteDataManager,
-}
-
-#[cfg(feature = "gtk-backend")]
-impl WebsiteDataStore {
-    /// The default persistent data store.
-    pub fn default() -> Self {
-        let manager = wk::WebsiteDataManager::builder().build();
-        Self { manager }
-    }
-
-    /// A private, ephemeral data store. Nothing is written to disk and all
-    /// data disappears when the process exits.
-    pub fn ephemeral() -> Self {
-        let manager = wk::WebsiteDataManager::builder().is_ephemeral(true).build();
-        Self { manager }
-    }
-
-    /// A data store rooted at custom directories (useful for per-user or
-    /// sandboxed apps).
-    pub fn with_directories(
-        data_directory: impl Into<String>,
-        cache_directory: impl Into<String>,
-    ) -> Self {
-        let data = data_directory.into();
-        let cache = cache_directory.into();
-        let manager = wk::WebsiteDataManager::builder()
-            .base_data_directory(data.as_str())
-            .base_cache_directory(cache.as_str())
-            .build();
-        Self { manager }
-    }
-
-    /// Whether this store is ephemeral (private browsing).
-    pub fn is_ephemeral(&self) -> bool {
-        self.manager.is_ephemeral()
-    }
-
-    /// Clear website data of the given types within a time span.
-    ///
-    /// Blocks until the engine finishes clearing. Returns `Err` when the
-    /// operation fails or is cancelled.
-    pub fn clear(&self, types: WebsiteDataType, time_span: std::time::Duration) -> Result<(), crate::WebKitError> {
-        let timespan = time_span.as_micros().min(i64::MAX as u128) as i64;
-        self.clear_timespan(types, timespan)
-    }
-
-    /// Clear all website data for all time.
-    pub fn clear_all(&self) -> Result<(), crate::WebKitError> {
-        self.clear_timespan(WebsiteDataType::all(), -1)
-    }
-
-    /// Clear only cookies.
-    pub fn clear_cookies(&self) -> Result<(), crate::WebKitError> {
-        self.clear(
-            WebsiteDataType::cookies(),
-            std::time::Duration::from_secs(u64::MAX),
-        )
-    }
-
-    /// Clear only caches.
-    pub fn clear_caches(&self) -> Result<(), crate::WebKitError> {
-        self.clear(
-            WebsiteDataType::caches(),
-            std::time::Duration::from_secs(u64::MAX),
-        )
-    }
-
-    fn clear_timespan(&self, types: WebsiteDataType, timespan: i64) -> Result<(), crate::WebKitError> {
-        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-        let user_data = Box::into_raw(Box::new(tx));
-
-        unsafe {
-            webkit6_sys::webkit_website_data_manager_clear(
-                self.manager.to_glib_none().0,
-                types.as_ffi(),
-                timespan,
-                std::ptr::null_mut(),
-                Some(clear_cb),
-                user_data as glib::ffi::gpointer,
-            );
-        }
-
-        match rx.recv() {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(crate::WebKitError::Engine(e)),
-            Err(_) => Err(crate::WebKitError::Engine(
-                "website data clear was cancelled".into(),
-            )),
-        }
-    }
-}
-
-#[cfg(feature = "gtk-backend")]
-unsafe extern "C" fn clear_cb(
-    _source: *mut glib::gobject_ffi::GObject,
-    _res: *mut gio::ffi::GAsyncResult,
-    user_data: glib::ffi::gpointer,
-) {
-    let sender: Box<std::sync::mpsc::Sender<Result<(), String>>> =
-        Box::from_raw(user_data as *mut _);
-    let _ = sender.send(Ok(()));
 }

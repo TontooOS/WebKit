@@ -2,8 +2,8 @@
 //!
 //! [`WebEngine`] decouples the public [`crate::WebView`] API from the HTML
 //! engine underneath. The default build targets WPE WebKit running in the
-//! out-of-process `tontoo-webengine` helper (same Apple WebKit engine as the
-//! legacy GTK backend, but Wayland-native without GTK). Frames arrive as
+//! out-of-process `tontoo-webengine` helper (Apple WebKit, Wayland-native).
+//! Frames arrive as
 //! BGRA pixel buffers and are blitted as Vello textures, so rounded corners
 //! and LiquidGlass keep working.
 //!
@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use serde::{Deserialize, Serialize};
+use foundation::serialization::JsonValue;
 
 use crate::cookie::Cookie;
 use crate::delegate::{PermissionKind, ScriptDialogKind};
@@ -84,7 +84,7 @@ impl SharedFrame {
 }
 
 /// Commands sent from the UI process to the engine process (or thread).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum EngineCommand {
     LoadUrl(String),
     LoadHtml {
@@ -170,7 +170,7 @@ pub enum EngineCommand {
 }
 
 /// Events sent from the engine process back to the UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum EngineEvent {
     /// A new frame is ready in shared memory (carries seq + size only;
     /// pixels travel via shm, never over the socket).
@@ -190,11 +190,11 @@ pub enum EngineEvent {
     },
     ScriptMessage {
         name: String,
-        body: serde_json::Value,
+        body: JsonValue,
     },
     JsResult {
         id: u64,
-        result: serde_json::Value,
+        result: JsonValue,
     },
     /// The page requested a JavaScript dialog. Answer with
     /// [`EngineCommand::DialogAnswer`].
@@ -290,7 +290,7 @@ pub trait WebEngine: Send + Sync {
     ///
     /// Engines answering inline (tests) return `Some`; transports return
     /// `None` so the view correlates the async `JsResult` event instead.
-    fn eval_sync(&self, _script: &str) -> Option<serde_json::Value> {
+    fn eval_sync(&self, _script: &str) -> Option<JsonValue> {
         None
     }
 }
@@ -346,8 +346,592 @@ impl WebEngine for MockEngine {
         Some(self.frame.read().expect("mock frame lock").clone())
     }
 
-    fn eval_sync(&self, _script: &str) -> Option<serde_json::Value> {
-        Some(serde_json::Value::Null)
+    fn eval_sync(&self, _script: &str) -> Option<JsonValue> {
+        Some(JsonValue::Null)
+    }
+}
+
+/// JSON wire encoding for the engine transport (replaces serde).
+///
+/// Shape matches the former serde externally-tagged format so recorded
+/// lines stay readable: unit variants are bare strings (`"Reload"`),
+/// other variants are single-key objects (`{"LoadFinished": ...}`).
+mod protocol {
+    use super::{Cookie, EngineCommand, EngineEvent, PermissionKind, ScriptDialogKind};
+    use foundation::serialization::JsonValue;
+
+    fn err_missing(field: &str) -> String {
+        format!("missing field `{}`", field)
+    }
+
+    fn err_type(field: &str) -> String {
+        format!("field `{}` has the wrong type", field)
+    }
+
+    fn req_str(doc: &JsonValue, key: &str) -> Result<String, String> {
+        doc.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| err_missing(key))
+    }
+
+    fn opt_str(doc: &JsonValue, key: &str) -> Result<Option<String>, String> {
+        match doc.get(key) {
+            None | Some(JsonValue::Null) => Ok(None),
+            Some(JsonValue::Str(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(err_type(key)),
+        }
+    }
+
+    fn req_u64(doc: &JsonValue, key: &str) -> Result<u64, String> {
+        doc.get(key)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| err_missing(key))
+    }
+
+    fn req_u32(doc: &JsonValue, key: &str) -> Result<u32, String> {
+        let v = req_u64(doc, key)?;
+        u32::try_from(v).map_err(|_| format!("field `{}` out of range", key))
+    }
+
+    fn req_f64(doc: &JsonValue, key: &str) -> Result<f64, String> {
+        doc.get(key)
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| err_missing(key))
+    }
+
+    fn req_bool(doc: &JsonValue, key: &str) -> Result<bool, String> {
+        doc.get(key)
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| err_missing(key))
+    }
+
+    fn str_field(key: &str, value: &str) -> (String, JsonValue) {
+        (key.to_string(), JsonValue::Str(value.to_string()))
+    }
+
+    fn opt_str_field(key: &str, value: &Option<String>) -> (String, JsonValue) {
+        let value = match value {
+            Some(text) => JsonValue::Str(text.clone()),
+            None => JsonValue::Null,
+        };
+        (key.to_string(), value)
+    }
+
+    fn dialog_kind_to_str(kind: ScriptDialogKind) -> &'static str {
+        match kind {
+            ScriptDialogKind::Alert => "Alert",
+            ScriptDialogKind::Confirm => "Confirm",
+            ScriptDialogKind::Prompt => "Prompt",
+            ScriptDialogKind::BeforeUnloadConfirm => "BeforeUnloadConfirm",
+        }
+    }
+
+    fn dialog_kind_from_str(s: &str) -> Option<ScriptDialogKind> {
+        match s {
+            "Alert" => Some(ScriptDialogKind::Alert),
+            "Confirm" => Some(ScriptDialogKind::Confirm),
+            "Prompt" => Some(ScriptDialogKind::Prompt),
+            "BeforeUnloadConfirm" => Some(ScriptDialogKind::BeforeUnloadConfirm),
+            _ => None,
+        }
+    }
+
+    const PERMISSION_KINDS: &[(&str, PermissionKind)] = &[
+        ("Camera", PermissionKind::Camera),
+        ("Microphone", PermissionKind::Microphone),
+        ("CameraAndMicrophone", PermissionKind::CameraAndMicrophone),
+        ("Geolocation", PermissionKind::Geolocation),
+        ("Notifications", PermissionKind::Notifications),
+        ("ClipboardRead", PermissionKind::ClipboardRead),
+        ("DeviceInfo", PermissionKind::DeviceInfo),
+        ("PointerLock", PermissionKind::PointerLock),
+        ("MediaKeySystem", PermissionKind::MediaKeySystem),
+        ("WebsiteDataAccess", PermissionKind::WebsiteDataAccess),
+        ("Other", PermissionKind::Other),
+    ];
+
+    fn permission_kind_to_str(kind: PermissionKind) -> &'static str {
+        PERMISSION_KINDS
+            .iter()
+            .find(|(_, k)| *k == kind)
+            .map(|(s, _)| *s)
+            .unwrap_or("Other")
+    }
+
+    fn permission_kind_from_str(s: &str) -> Option<PermissionKind> {
+        PERMISSION_KINDS
+            .iter()
+            .find(|(name, _)| *name == s)
+            .map(|(_, k)| *k)
+    }
+
+    fn tagged(tag: &str, payload: JsonValue) -> JsonValue {
+        JsonValue::Object(vec![(tag.to_string(), payload)])
+    }
+
+    impl EngineCommand {
+        pub fn to_json_string(&self) -> String {
+            self.to_json_value().to_compact_string()
+        }
+
+        fn to_json_value(&self) -> JsonValue {
+            match self {
+                Self::LoadUrl(url) => tagged("LoadUrl", JsonValue::Str(url.clone())),
+                Self::LoadHtml { html, base_uri } => tagged(
+                    "LoadHtml",
+                    JsonValue::Object(vec![
+                        str_field("html", html),
+                        opt_str_field("base_uri", base_uri),
+                    ]),
+                ),
+                Self::EvaluateJs { id, script } => tagged(
+                    "EvaluateJs",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        str_field("script", script),
+                    ]),
+                ),
+                Self::Resize { width, height, scale } => tagged(
+                    "Resize",
+                    JsonValue::Object(vec![
+                        ("width".to_string(), JsonValue::Integer(*width as i64)),
+                        ("height".to_string(), JsonValue::Integer(*height as i64)),
+                        ("scale".to_string(), JsonValue::Float(*scale as f64)),
+                    ]),
+                ),
+                Self::MouseDown { x, y } => tagged(
+                    "MouseDown",
+                    JsonValue::Object(vec![
+                        ("x".to_string(), JsonValue::Float(*x)),
+                        ("y".to_string(), JsonValue::Float(*y)),
+                    ]),
+                ),
+                Self::MouseUp { x, y } => tagged(
+                    "MouseUp",
+                    JsonValue::Object(vec![
+                        ("x".to_string(), JsonValue::Float(*x)),
+                        ("y".to_string(), JsonValue::Float(*y)),
+                    ]),
+                ),
+                Self::MouseMove { x, y } => tagged(
+                    "MouseMove",
+                    JsonValue::Object(vec![
+                        ("x".to_string(), JsonValue::Float(*x)),
+                        ("y".to_string(), JsonValue::Float(*y)),
+                    ]),
+                ),
+                Self::Scroll { dx, dy } => tagged(
+                    "Scroll",
+                    JsonValue::Object(vec![
+                        ("dx".to_string(), JsonValue::Float(*dx)),
+                        ("dy".to_string(), JsonValue::Float(*dy)),
+                    ]),
+                ),
+                Self::KeyText(text) => tagged("KeyText", JsonValue::Str(text.clone())),
+                Self::SpecialKey { key } => tagged(
+                    "SpecialKey",
+                    JsonValue::Object(vec![str_field("key", key)]),
+                ),
+                Self::Reload => JsonValue::Str("Reload".to_string()),
+                Self::ReloadBypassCache => JsonValue::Str("ReloadBypassCache".to_string()),
+                Self::GoBack => JsonValue::Str("GoBack".to_string()),
+                Self::GoForward => JsonValue::Str("GoForward".to_string()),
+                Self::Stop => JsonValue::Str("Stop".to_string()),
+                Self::DialogAnswer { id, confirmed, text } => tagged(
+                    "DialogAnswer",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        ("confirmed".to_string(), JsonValue::Bool(*confirmed)),
+                        opt_str_field("text", text),
+                    ]),
+                ),
+                Self::PermissionAnswer { id, granted } => tagged(
+                    "PermissionAnswer",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        ("granted".to_string(), JsonValue::Bool(*granted)),
+                    ]),
+                ),
+                Self::DownloadDestination { id, path } => tagged(
+                    "DownloadDestination",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        opt_str_field("path", path),
+                    ]),
+                ),
+                Self::CancelDownload { id } => tagged(
+                    "CancelDownload",
+                    JsonValue::Object(vec![("id".to_string(), JsonValue::Integer(*id as i64))]),
+                ),
+                Self::ClearData { cookies, cache } => tagged(
+                    "ClearData",
+                    JsonValue::Object(vec![
+                        ("cookies".to_string(), JsonValue::Bool(*cookies)),
+                        ("cache".to_string(), JsonValue::Bool(*cache)),
+                    ]),
+                ),
+                Self::ListCookies { id } => tagged(
+                    "ListCookies",
+                    JsonValue::Object(vec![("id".to_string(), JsonValue::Integer(*id as i64))]),
+                ),
+                Self::AddCookie { cookie } => tagged(
+                    "AddCookie",
+                    JsonValue::Object(vec![(
+                        "cookie".to_string(),
+                        cookie.to_json_value(),
+                    )]),
+                ),
+                Self::DeleteCookie { domain, path, name } => tagged(
+                    "DeleteCookie",
+                    JsonValue::Object(vec![
+                        str_field("domain", domain),
+                        str_field("path", path),
+                        str_field("name", name),
+                    ]),
+                ),
+            }
+        }
+
+        pub fn from_json_str(s: &str) -> Result<Self, String> {
+            let doc = JsonValue::parse(s).map_err(|e| e.to_string())?;
+            Self::from_json_value(&doc)
+        }
+
+        fn from_json_value(doc: &JsonValue) -> Result<Self, String> {
+            if let Some(tag) = doc.as_str() {
+                return match tag {
+                    "Reload" => Ok(Self::Reload),
+                    "ReloadBypassCache" => Ok(Self::ReloadBypassCache),
+                    "GoBack" => Ok(Self::GoBack),
+                    "GoForward" => Ok(Self::GoForward),
+                    "Stop" => Ok(Self::Stop),
+                    other => Err(format!("unknown command `{}`", other)),
+                };
+            }
+            let entries = doc
+                .object_entries()
+                .ok_or_else(|| "command must be an object".to_string())?;
+            let (tag, payload) = entries
+                .first()
+                .ok_or_else(|| "empty command object".to_string())?;
+            match tag.as_str() {
+                "LoadUrl" => Ok(Self::LoadUrl(
+                    payload
+                        .as_str()
+                        .ok_or_else(|| err_type("LoadUrl"))?
+                        .to_string(),
+                )),
+                "LoadHtml" => Ok(Self::LoadHtml {
+                    html: req_str(payload, "html")?,
+                    base_uri: opt_str(payload, "base_uri")?,
+                }),
+                "EvaluateJs" => Ok(Self::EvaluateJs {
+                    id: req_u64(payload, "id")?,
+                    script: req_str(payload, "script")?,
+                }),
+                "Resize" => Ok(Self::Resize {
+                    width: req_u32(payload, "width")?,
+                    height: req_u32(payload, "height")?,
+                    scale: req_f64(payload, "scale")? as f32,
+                }),
+                "MouseDown" => Ok(Self::MouseDown {
+                    x: req_f64(payload, "x")?,
+                    y: req_f64(payload, "y")?,
+                }),
+                "MouseUp" => Ok(Self::MouseUp {
+                    x: req_f64(payload, "x")?,
+                    y: req_f64(payload, "y")?,
+                }),
+                "MouseMove" => Ok(Self::MouseMove {
+                    x: req_f64(payload, "x")?,
+                    y: req_f64(payload, "y")?,
+                }),
+                "Scroll" => Ok(Self::Scroll {
+                    dx: req_f64(payload, "dx")?,
+                    dy: req_f64(payload, "dy")?,
+                }),
+                "KeyText" => Ok(Self::KeyText(
+                    payload
+                        .as_str()
+                        .ok_or_else(|| err_type("KeyText"))?
+                        .to_string(),
+                )),
+                "SpecialKey" => Ok(Self::SpecialKey {
+                    key: req_str(payload, "key")?,
+                }),
+                "DialogAnswer" => Ok(Self::DialogAnswer {
+                    id: req_u64(payload, "id")?,
+                    confirmed: req_bool(payload, "confirmed")?,
+                    text: opt_str(payload, "text")?,
+                }),
+                "PermissionAnswer" => Ok(Self::PermissionAnswer {
+                    id: req_u64(payload, "id")?,
+                    granted: req_bool(payload, "granted")?,
+                }),
+                "DownloadDestination" => Ok(Self::DownloadDestination {
+                    id: req_u64(payload, "id")?,
+                    path: opt_str(payload, "path")?,
+                }),
+                "CancelDownload" => Ok(Self::CancelDownload {
+                    id: req_u64(payload, "id")?,
+                }),
+                "ClearData" => Ok(Self::ClearData {
+                    cookies: req_bool(payload, "cookies")?,
+                    cache: req_bool(payload, "cache")?,
+                }),
+                "ListCookies" => Ok(Self::ListCookies {
+                    id: req_u64(payload, "id")?,
+                }),
+                "AddCookie" => Ok(Self::AddCookie {
+                    cookie: Cookie::from_json_value(
+                        payload
+                            .get("cookie")
+                            .ok_or_else(|| err_missing("cookie"))?,
+                    ),
+                }),
+                "DeleteCookie" => Ok(Self::DeleteCookie {
+                    domain: req_str(payload, "domain")?,
+                    path: req_str(payload, "path")?,
+                    name: req_str(payload, "name")?,
+                }),
+                other => Err(format!("unknown command `{}`", other)),
+            }
+        }
+    }
+
+    impl EngineEvent {
+        pub fn to_json_string(&self) -> String {
+            self.to_json_value().to_compact_string()
+        }
+
+        fn to_json_value(&self) -> JsonValue {
+            match self {
+                Self::FrameReady { seq, width, height } => tagged(
+                    "FrameReady",
+                    JsonValue::Object(vec![
+                        ("seq".to_string(), JsonValue::Integer(*seq as i64)),
+                        ("width".to_string(), JsonValue::Integer(*width as i64)),
+                        ("height".to_string(), JsonValue::Integer(*height as i64)),
+                    ]),
+                ),
+                Self::Title(value) => tagged("Title", opt_str_value(value)),
+                Self::Url(value) => tagged("Url", opt_str_value(value)),
+                Self::Progress(value) => tagged("Progress", JsonValue::Float(*value)),
+                Self::LoadStarted(value) => tagged("LoadStarted", opt_str_value(value)),
+                Self::LoadFinished(value) => tagged("LoadFinished", opt_str_value(value)),
+                Self::LoadFailed { url, error } => tagged(
+                    "LoadFailed",
+                    JsonValue::Object(vec![
+                        opt_str_field("url", url),
+                        str_field("error", error),
+                    ]),
+                ),
+                Self::ScriptMessage { name, body } => tagged(
+                    "ScriptMessage",
+                    JsonValue::Object(vec![
+                        str_field("name", name),
+                        ("body".to_string(), body.clone()),
+                    ]),
+                ),
+                Self::JsResult { id, result } => tagged(
+                    "JsResult",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        ("result".to_string(), result.clone()),
+                    ]),
+                ),
+                Self::ScriptDialog { id, kind, message, prompt_default } => tagged(
+                    "ScriptDialog",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        (
+                            "kind".to_string(),
+                            JsonValue::Str(dialog_kind_to_str(*kind).to_string()),
+                        ),
+                        str_field("message", message),
+                        opt_str_field("prompt_default", prompt_default),
+                    ]),
+                ),
+                Self::PermissionRequest { id, kind } => tagged(
+                    "PermissionRequest",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        (
+                            "kind".to_string(),
+                            JsonValue::Str(permission_kind_to_str(*kind).to_string()),
+                        ),
+                    ]),
+                ),
+                Self::DownloadStarted { id, uri, suggested_filename } => tagged(
+                    "DownloadStarted",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        opt_str_field("uri", uri),
+                        str_field("suggested_filename", suggested_filename),
+                    ]),
+                ),
+                Self::DownloadProgress { id, progress, received_bytes } => tagged(
+                    "DownloadProgress",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        ("progress".to_string(), JsonValue::Float(*progress)),
+                        (
+                            "received_bytes".to_string(),
+                            JsonValue::Integer(*received_bytes as i64),
+                        ),
+                    ]),
+                ),
+                Self::DownloadFinished { id } => tagged(
+                    "DownloadFinished",
+                    JsonValue::Object(vec![("id".to_string(), JsonValue::Integer(*id as i64))]),
+                ),
+                Self::DownloadFailed { id, error } => tagged(
+                    "DownloadFailed",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        str_field("error", error),
+                    ]),
+                ),
+                Self::Cookies { id, cookies } => tagged(
+                    "Cookies",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        (
+                            "cookies".to_string(),
+                            JsonValue::Array(
+                                cookies.iter().map(|c| c.to_json_value()).collect(),
+                            ),
+                        ),
+                    ]),
+                ),
+                Self::History { can_back, can_forward } => tagged(
+                    "History",
+                    JsonValue::Object(vec![
+                        ("can_back".to_string(), JsonValue::Bool(*can_back)),
+                        ("can_forward".to_string(), JsonValue::Bool(*can_forward)),
+                    ]),
+                ),
+                Self::ReadyToShow => JsonValue::Str("ReadyToShow".to_string()),
+            }
+        }
+
+        pub fn from_json_str(s: &str) -> Result<Self, String> {
+            let doc = JsonValue::parse(s).map_err(|e| e.to_string())?;
+            Self::from_json_value(&doc)
+        }
+
+        fn from_json_value(doc: &JsonValue) -> Result<Self, String> {
+            if let Some(tag) = doc.as_str() {
+                return match tag {
+                    "ReadyToShow" => Ok(Self::ReadyToShow),
+                    other => Err(format!("unknown event `{}`", other)),
+                };
+            }
+            let entries = doc
+                .object_entries()
+                .ok_or_else(|| "event must be an object".to_string())?;
+            let (tag, payload) = entries
+                .first()
+                .ok_or_else(|| "empty event object".to_string())?;
+            match tag.as_str() {
+                "FrameReady" => Ok(Self::FrameReady {
+                    seq: req_u64(payload, "seq")?,
+                    width: req_u32(payload, "width")?,
+                    height: req_u32(payload, "height")?,
+                }),
+                "Title" => Ok(Self::Title(opt_payload_string(payload)?)),
+                "Url" => Ok(Self::Url(opt_payload_string(payload)?)),
+                "Progress" => Ok(Self::Progress(
+                    payload.as_f64().ok_or_else(|| err_type("Progress"))?,
+                )),
+                "LoadStarted" => Ok(Self::LoadStarted(opt_payload_string(payload)?)),
+                "LoadFinished" => Ok(Self::LoadFinished(opt_payload_string(payload)?)),
+                "LoadFailed" => Ok(Self::LoadFailed {
+                    url: opt_str(payload, "url")?,
+                    error: req_str(payload, "error")?,
+                }),
+                "ScriptMessage" => Ok(Self::ScriptMessage {
+                    name: req_str(payload, "name")?,
+                    body: payload
+                        .get("body")
+                        .cloned()
+                        .ok_or_else(|| err_missing("body"))?,
+                }),
+                "JsResult" => Ok(Self::JsResult {
+                    id: req_u64(payload, "id")?,
+                    result: payload
+                        .get("result")
+                        .cloned()
+                        .ok_or_else(|| err_missing("result"))?,
+                }),
+                "ScriptDialog" => Ok(Self::ScriptDialog {
+                    id: req_u64(payload, "id")?,
+                    kind: payload
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .and_then(dialog_kind_from_str)
+                        .ok_or_else(|| err_missing("kind"))?,
+                    message: req_str(payload, "message")?,
+                    prompt_default: opt_str(payload, "prompt_default")?,
+                }),
+                "PermissionRequest" => Ok(Self::PermissionRequest {
+                    id: req_u64(payload, "id")?,
+                    kind: payload
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .and_then(permission_kind_from_str)
+                        .ok_or_else(|| err_missing("kind"))?,
+                }),
+                "DownloadStarted" => Ok(Self::DownloadStarted {
+                    id: req_u64(payload, "id")?,
+                    uri: opt_str(payload, "uri")?,
+                    suggested_filename: req_str(payload, "suggested_filename")?,
+                }),
+                "DownloadProgress" => Ok(Self::DownloadProgress {
+                    id: req_u64(payload, "id")?,
+                    progress: req_f64(payload, "progress")?,
+                    received_bytes: req_u64(payload, "received_bytes")?,
+                }),
+                "DownloadFinished" => Ok(Self::DownloadFinished {
+                    id: req_u64(payload, "id")?,
+                }),
+                "DownloadFailed" => Ok(Self::DownloadFailed {
+                    id: req_u64(payload, "id")?,
+                    error: req_str(payload, "error")?,
+                }),
+                "Cookies" => {
+                    let cookies = payload
+                        .get("cookies")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| err_missing("cookies"))?;
+                    Ok(Self::Cookies {
+                        id: req_u64(payload, "id")?,
+                        cookies: cookies.iter().map(Cookie::from_json_value).collect(),
+                    })
+                }
+                "History" => Ok(Self::History {
+                    can_back: req_bool(payload, "can_back")?,
+                    can_forward: req_bool(payload, "can_forward")?,
+                }),
+                other => Err(format!("unknown event `{}`", other)),
+            }
+        }
+    }
+
+    fn opt_str_value(value: &Option<String>) -> JsonValue {
+        match value {
+            Some(text) => JsonValue::Str(text.clone()),
+            None => JsonValue::Null,
+        }
+    }
+
+    fn opt_payload_string(payload: &JsonValue) -> Result<Option<String>, String> {
+        match payload {
+            JsonValue::Null => Ok(None),
+            JsonValue::Str(s) => Ok(Some(s.clone())),
+            _ => Err(err_type("value")),
+        }
     }
 }
 

@@ -5,16 +5,14 @@ edition = "2021"
 license = "TCL"
 description = "Web content framework for TontooOS - Apple WebKit-style API backed by WebKitGTK"
 readme = "README.md"
-keywords = ["tontoo", "webkit", "web", "gtk4", "browser", "ui"]
+keywords = ["tontoo", "webkit", "web", "browser", "ui"]
 categories = ["gui", "api-bindings"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-libc = "0.2"
+foundation = { path = "../Foundation" }
 corelocation = { path = "../CoreLocation" }
 
-# Vello/WGPU path (default): texture-blit web view for TontooUI, no GTK.
+# Vello/WGPU path (default): texture-blit web view for TontooUI.
 tontooui = { path = "../TontooUI", optional = true }
 vello = { version = "0.10", optional = true }
 
@@ -27,22 +25,10 @@ image = { version = "0.25", optional = true }
 ureq = { version = "3", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
-# Legacy GTK4 path: WebKitGTK widget embedding. Requires system
-# webkit2gtk-4.1 and a GTK4 event loop; cannot be used inside
-# TontooUI (Vello) windows.
-gtk = { package = "gtk4", version = "0.9", features = ["v4_12"], optional = true }
-gio = { version = "0.20", optional = true }
-glib = { version = "0.20", optional = true }
-webkit6 = { version = "0.4", features = ["v2_44"], optional = true }
-webkit6-sys = { version = "0.4", optional = true }
-javascriptcore6 = { version = "0.4", optional = true }
-soup = { package = "soup3", version = "0.7", optional = true }
-
 [features]
 default = ["vello", "chromium"]
 vello = ["dep:tontooui", "dep:vello"]
 chromium = ["dep:tungstenite", "dep:image", "dep:ureq", "dep:zip"]
-gtk-backend = ["dep:gtk", "dep:gio", "dep:glib", "dep:webkit6", "dep:webkit6-sys", "dep:javascriptcore6", "dep:soup"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -50,16 +36,6 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "tontoo-webengine"
 path = "src/bin/tontoo-webengine.rs"
-
-[[example]]
-name = "browser"
-path = "examples/browser.rs"
-required-features = ["gtk-backend"]
-
-[[example]]
-name = "minimal"
-path = "examples/minimal.rs"
-required-features = ["gtk-backend"]
 
 [[example]]
 name = "vello_webview"

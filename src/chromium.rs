@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 
 use tungstenite::{Message, WebSocket, connect};
 
+use foundation::serialization::JsonValue;
+
 use crate::cookie::Cookie;
 
 /// How long a single CDP round-trip may take (cold browsers in
@@ -72,7 +74,7 @@ pub fn find_chrome() -> Result<PathBuf, String> {
 /// Raw CDP event (method + params) coming off a connection.
 pub struct CdpRawEvent {
     pub method: String,
-    pub params: serde_json::Value,
+    pub params: JsonValue,
 }
 
 /// Helper-facing CDP events after classification.
@@ -107,7 +109,7 @@ pub enum CdpEvent {
 pub struct CdpConn {
     socket: Mutex<WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>>,
     next_id: AtomicU32,
-    pending: Mutex<HashMap<u32, SyncSender<Result<serde_json::Value, String>>>>,
+    pending: Mutex<HashMap<u32, SyncSender<Result<JsonValue, String>>>>,
     shutdown: AtomicBool,
 }
 
@@ -159,7 +161,7 @@ impl CdpConn {
                         {
                             let _ = tx.try_send(match error {
                                 Some(e) => Err(e),
-                                None => Ok(result.unwrap_or(serde_json::Value::Null)),
+                                None => Ok(result.unwrap_or(JsonValue::Null)),
                             });
                         }
                     }
@@ -174,11 +176,7 @@ impl CdpConn {
     }
 
     /// Send a method call and wait for its result.
-    pub fn call(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    pub fn call(&self, method: &str, params: JsonValue) -> Result<JsonValue, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = sync_channel(1);
         self.pending.lock().expect("pending lock").insert(id, tx);
@@ -230,19 +228,19 @@ impl CdpConn {
 pub enum Incoming {
     Reply {
         id: u32,
-        result: Option<serde_json::Value>,
+        result: Option<JsonValue>,
         error: Option<String>,
     },
     Event {
         method: String,
-        params: serde_json::Value,
+        params: JsonValue,
     },
     Other,
 }
 
 /// Parse one inbound CDP text message.
 pub(crate) fn parse_message(text: &str) -> Incoming {
-    let value: serde_json::Value = match serde_json::from_str(text) {
+    let value: JsonValue = match JsonValue::parse(text) {
         Ok(v) => v,
         Err(_) => return Incoming::Other,
     };
@@ -271,23 +269,28 @@ pub(crate) fn parse_message(text: &str) -> Incoming {
 }
 
 /// Build a CDP method call line.
-pub(crate) fn method_call(id: u32, method: &str, params: &serde_json::Value) -> String {
-    serde_json::json!({ "id": id, "method": method, "params": params }).to_string()
+pub(crate) fn method_call(id: u32, method: &str, params: &JsonValue) -> String {
+    JsonValue::Object(vec![
+        ("id".to_string(), JsonValue::Integer(id as i64)),
+        ("method".to_string(), JsonValue::Str(method.to_string())),
+        ("params".to_string(), params.clone()),
+    ])
+    .to_compact_string()
 }
 
 /// Map a Runtime RemoteObject to plain JSON. Non-serializable numbers
 /// (`NaN`, infinities) and missing values become null.
-pub(crate) fn remote_to_json(obj: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn remote_to_json(obj: &JsonValue) -> JsonValue {
     if obj.get("type").and_then(|t| t.as_str()) == Some("undefined") {
-        return serde_json::Value::Null;
+        return JsonValue::Null;
     }
     if let Some(unserializable) = obj.get("unserializableValue").and_then(|v| v.as_str()) {
         return match unserializable {
-            "0" | "-0" => serde_json::json!(0),
-            _ => serde_json::Value::Null,
+            "0" | "-0" => JsonValue::Integer(0),
+            _ => JsonValue::Null,
         };
     }
-    obj.get("value").cloned().unwrap_or(serde_json::Value::Null)
+    obj.get("value").cloned().unwrap_or(JsonValue::Null)
 }
 
 /// Decode a PNG screenshot to BGRA bytes plus dimensions.
@@ -305,7 +308,7 @@ pub(crate) fn png_to_bgra(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 /// Pick the page target WebSocket URL from `/json/list`.
-pub(crate) fn pick_page_target(list: &serde_json::Value) -> Option<String> {
+pub(crate) fn pick_page_target(list: &JsonValue) -> Option<String> {
     list.as_array()?.iter().find_map(|target| {
         if target.get("type").and_then(|t| t.as_str()) == Some("page") {
             target
@@ -329,7 +332,7 @@ pub(crate) fn devtools_ws_from_line(line: &str) -> Option<String> {
 /// HTTP/1.1 is required: the DevTools server ignores HTTP/1.0 requests.
 /// The server keeps the connection open, so exactly `Content-Length` body
 /// bytes are read instead of waiting for EOF.
-fn http_get_json(host: &str, port: u16, path: &str) -> Result<serde_json::Value, String> {
+fn http_get_json(host: &str, port: u16, path: &str) -> Result<JsonValue, String> {
     let mut stream = TcpStream::connect((host, port))
         .map_err(|e| format!("devtools http: {e}"))?;
     stream
@@ -363,7 +366,9 @@ fn http_get_json(host: &str, port: u16, path: &str) -> Result<serde_json::Value,
         }
     }
     .ok_or_else(|| "devtools http: incomplete response".to_string())?;
-    serde_json::from_slice(&body).map_err(|e| format!("devtools json: {e}"))
+    let text =
+        String::from_utf8(body).map_err(|e| format!("devtools utf8: {e}"))?;
+    JsonValue::parse(&text).map_err(|e| format!("devtools json: {e}"))
 }
 
 /// Position just past the header terminator, if fully received.
@@ -545,21 +550,24 @@ impl CdpPage {
     /// Post-connect initialization, with per-step debug markers.
     fn setup(&self, download_dir: &std::path::Path) -> Result<(), String> {
         self.step("Page.enable", || {
-            self.page.call("Page.enable", serde_json::json!({}))
+            self.page.call("Page.enable", JsonValue::Object(Vec::new()))
         })?;
         self.step("Runtime.enable", || {
-            self.page.call("Runtime.enable", serde_json::json!({}))
+            self.page.call("Runtime.enable", JsonValue::Object(Vec::new()))
         })?;
         self.step("Network.enable", || {
-            self.page.call("Network.enable", serde_json::json!({}))
+            self.page.call("Network.enable", JsonValue::Object(Vec::new()))
         })?;
         self.step("Page.setDownloadBehavior", || {
             self.page.call(
                 "Page.setDownloadBehavior",
-                serde_json::json!({
-                    "behavior": "allow",
-                    "downloadPath": download_dir.to_string_lossy(),
-                }),
+                JsonValue::Object(vec![
+                    ("behavior".to_string(), JsonValue::Str("allow".to_string())),
+                    (
+                        "downloadPath".to_string(),
+                        JsonValue::Str(download_dir.to_string_lossy().to_string()),
+                    ),
+                ]),
             )
         })?;
         if std::env::var_os("TONTOO_WEBENGINE_DEBUG").is_some() {
@@ -567,7 +575,7 @@ impl CdpPage {
         }
         if let Ok(tree) = self
             .page
-            .call("Page.getFrameTree", serde_json::json!({}))
+            .call("Page.getFrameTree", JsonValue::Object(Vec::new()))
         {
             if let Some(id) = tree
                 .get("frameTree")
@@ -584,7 +592,7 @@ impl CdpPage {
             eprintln!("debug: cdp setup Page.getFrameTree -> false");
         }
         self.step("Emulation.setDeviceMetricsOverride", || {
-            self.apply_viewport().map(|()| serde_json::Value::Null)
+            self.apply_viewport().map(|()| JsonValue::Null)
         })?;
         Ok(())
     }
@@ -592,7 +600,7 @@ impl CdpPage {
     fn step(
         &self,
         name: &str,
-        call: impl FnOnce() -> Result<serde_json::Value, String>,
+        call: impl FnOnce() -> Result<JsonValue, String>,
     ) -> Result<(), String> {
         if std::env::var_os("TONTOO_WEBENGINE_DEBUG").is_some() {
             eprintln!("debug: cdp setup {name} ...");
@@ -608,10 +616,12 @@ impl CdpPage {
         let (w, h, scale) = *self.viewport.lock().expect("viewport lock");
         self.page.call(
             "Emulation.setDeviceMetricsOverride",
-            serde_json::json!({
-                "width": w, "height": h,
-                "deviceScaleFactor": scale, "mobile": false,
-            }),
+            JsonValue::Object(vec![
+                ("width".to_string(), JsonValue::Integer(w as i64)),
+                ("height".to_string(), JsonValue::Integer(h as i64)),
+                ("deviceScaleFactor".to_string(), JsonValue::Float(scale as f64)),
+                ("mobile".to_string(), JsonValue::Bool(false)),
+            ]),
         )?;
         Ok(())
     }
@@ -624,8 +634,10 @@ impl CdpPage {
 
     /// Navigate the main frame.
     pub fn navigate(&self, url: &str) -> Result<(), String> {
-        self.page
-            .call("Page.navigate", serde_json::json!({ "url": url }))?;
+        self.page.call(
+            "Page.navigate",
+            JsonValue::Object(vec![("url".to_string(), JsonValue::Str(url.to_string()))]),
+        )?;
         Ok(())
     }
 
@@ -634,7 +646,10 @@ impl CdpPage {
         let frame_id = self.frame_id.lock().expect("frame lock").clone();
         self.page.call(
             "Page.setDocumentContent",
-            serde_json::json!({ "frameId": frame_id, "html": html }),
+            JsonValue::Object(vec![
+                ("frameId".to_string(), JsonValue::Str(frame_id)),
+                ("html".to_string(), JsonValue::Str(html.to_string())),
+            ]),
         )?;
         Ok(())
     }
@@ -643,14 +658,15 @@ impl CdpPage {
     pub fn reload(&self, bypass_cache: bool) -> Result<(), String> {
         self.page.call(
             "Page.reload",
-            serde_json::json!({ "ignoreCache": bypass_cache }),
+            JsonValue::Object(vec![("ignoreCache".to_string(), JsonValue::Bool(bypass_cache))]),
         )?;
         Ok(())
     }
 
     /// Stop the current load.
     pub fn stop_loading(&self) -> Result<(), String> {
-        self.page.call("Page.stopLoading", serde_json::json!({}))?;
+        self.page
+            .call("Page.stopLoading", JsonValue::Object(Vec::new()))?;
         Ok(())
     }
 
@@ -658,7 +674,7 @@ impl CdpPage {
     pub fn history_state(&self) -> Result<(bool, bool), String> {
         let history = self
             .page
-            .call("Page.getNavigationHistory", serde_json::json!({}))?;
+            .call("Page.getNavigationHistory", JsonValue::Object(Vec::new()))?;
         let index = history.get("currentIndex").and_then(|i| i.as_u64()).unwrap_or(0);
         let len = history
             .get("entries")
@@ -672,7 +688,7 @@ impl CdpPage {
     pub fn go_history(&self, delta: i64) -> Result<bool, String> {
         let history = self
             .page
-            .call("Page.getNavigationHistory", serde_json::json!({}))?;
+            .call("Page.getNavigationHistory", JsonValue::Object(Vec::new()))?;
         let index = history.get("currentIndex").and_then(|i| i.as_i64()).unwrap_or(0);
         let entries = history
             .get("entries")
@@ -686,7 +702,7 @@ impl CdpPage {
         let id = entries[target as usize].get("id").cloned().unwrap_or_default();
         self.page.call(
             "Page.navigateToHistoryEntry",
-            serde_json::json!({ "entryId": id }),
+            JsonValue::Object(vec![("entryId".to_string(), id)]),
         )?;
         Ok(true)
     }
@@ -695,7 +711,7 @@ impl CdpPage {
     pub fn capture(&self) -> Result<(Vec<u8>, u32, u32), String> {
         let shot = self.page.call(
             "Page.captureScreenshot",
-            serde_json::json!({ "format": "png" }),
+            JsonValue::Object(vec![("format".to_string(), JsonValue::Str("png".to_string()))]),
         )?;
         let data = shot
             .get("data")
@@ -706,14 +722,14 @@ impl CdpPage {
     }
 
     /// Evaluate JavaScript and return the JSON value.
-    pub fn evaluate(&self, script: &str) -> Result<serde_json::Value, String> {
+    pub fn evaluate(&self, script: &str) -> Result<JsonValue, String> {
         let reply = self.page.call(
             "Runtime.evaluate",
-            serde_json::json!({
-                "expression": script,
-                "returnByValue": true,
-                "awaitPromise": true,
-            }),
+            JsonValue::Object(vec![
+                ("expression".to_string(), JsonValue::Str(script.to_string())),
+                ("returnByValue".to_string(), JsonValue::Bool(true)),
+                ("awaitPromise".to_string(), JsonValue::Bool(true)),
+            ]),
         )?;
         if let Some(exception) = reply.get("exceptionDetails") {
             let text = exception
@@ -725,7 +741,7 @@ impl CdpPage {
         Ok(reply
             .get("result")
             .map(remote_to_json)
-            .unwrap_or(serde_json::Value::Null))
+            .unwrap_or(JsonValue::Null))
     }
 
     /// Document title via JS.
@@ -739,7 +755,11 @@ impl CdpPage {
     pub fn mouse_move(&self, x: f64, y: f64) -> Result<(), String> {
         self.page.call(
             "Input.dispatchMouseEvent",
-            serde_json::json!({ "type": "mouseMoved", "x": x, "y": y }),
+            JsonValue::Object(vec![
+                ("type".to_string(), JsonValue::Str("mouseMoved".to_string())),
+                ("x".to_string(), JsonValue::Float(x)),
+                ("y".to_string(), JsonValue::Float(y)),
+            ]),
         )?;
         Ok(())
     }
@@ -748,10 +768,18 @@ impl CdpPage {
     pub fn mouse_button(&self, x: f64, y: f64, pressed: bool) -> Result<(), String> {
         self.page.call(
             "Input.dispatchMouseEvent",
-            serde_json::json!({
-                "type": if pressed { "mousePressed" } else { "mouseReleased" },
-                "x": x, "y": y, "button": "left", "clickCount": 1,
-            }),
+            JsonValue::Object(vec![
+                (
+                    "type".to_string(),
+                    JsonValue::Str(
+                        if pressed { "mousePressed" } else { "mouseReleased" }.to_string(),
+                    ),
+                ),
+                ("x".to_string(), JsonValue::Float(x)),
+                ("y".to_string(), JsonValue::Float(y)),
+                ("button".to_string(), JsonValue::Str("left".to_string())),
+                ("clickCount".to_string(), JsonValue::Integer(1)),
+            ]),
         )?;
         Ok(())
     }
@@ -760,10 +788,13 @@ impl CdpPage {
     pub fn wheel(&self, x: f64, y: f64, dx: f64, dy: f64) -> Result<(), String> {
         self.page.call(
             "Input.dispatchMouseEvent",
-            serde_json::json!({
-                "type": "mouseWheel", "x": x, "y": y,
-                "deltaX": dx, "deltaY": dy,
-            }),
+            JsonValue::Object(vec![
+                ("type".to_string(), JsonValue::Str("mouseWheel".to_string())),
+                ("x".to_string(), JsonValue::Float(x)),
+                ("y".to_string(), JsonValue::Float(y)),
+                ("deltaX".to_string(), JsonValue::Float(dx)),
+                ("deltaY".to_string(), JsonValue::Float(dy)),
+            ]),
         )?;
         Ok(())
     }
@@ -772,7 +803,7 @@ impl CdpPage {
     pub fn insert_text(&self, text: &str) -> Result<(), String> {
         self.page.call(
             "Input.insertText",
-            serde_json::json!({ "text": text }),
+            JsonValue::Object(vec![("text".to_string(), JsonValue::Str(text.to_string()))]),
         )?;
         Ok(())
     }
@@ -791,21 +822,24 @@ impl CdpPage {
         };
         self.page.call(
             "Input.dispatchKeyEvent",
-            serde_json::json!({
-                "type": "rawKeyDown", "key": key, "code": key,
-                "windowsVirtualKeyCode": code,
-            }),
+            JsonValue::Object(vec![
+                ("type".to_string(), JsonValue::Str("rawKeyDown".to_string())),
+                ("key".to_string(), JsonValue::Str(key.to_string())),
+                ("code".to_string(), JsonValue::Str(key.to_string())),
+                ("windowsVirtualKeyCode".to_string(), JsonValue::Integer(code)),
+            ]),
         )?;
         Ok(())
     }
 
     /// Answer a JavaScript dialog.
     pub fn dialog_answer(&self, accept: bool, text: Option<&str>) -> Result<(), String> {
-        let mut params = serde_json::json!({ "accept": accept });
+        let mut entries = vec![("accept".to_string(), JsonValue::Bool(accept))];
         if let Some(text) = text {
-            params["promptText"] = serde_json::Value::String(text.to_string());
+            entries.push(("promptText".to_string(), JsonValue::Str(text.to_string())));
         }
-        self.page.call("Page.handleJavaScriptDialog", params)?;
+        self.page
+            .call("Page.handleJavaScriptDialog", JsonValue::Object(entries))?;
         Ok(())
     }
 
@@ -813,14 +847,16 @@ impl CdpPage {
     pub fn cancel_download(&self, guid: &str) -> Result<(), String> {
         self.browser.call(
             "Browser.cancelDownload",
-            serde_json::json!({ "guid": guid }),
+            JsonValue::Object(vec![("guid".to_string(), JsonValue::Str(guid.to_string()))]),
         )?;
         Ok(())
     }
 
     /// List cookies of the store.
     pub fn list_cookies(&self) -> Result<Vec<Cookie>, String> {
-        let reply = self.page.call("Storage.getCookies", serde_json::json!({}))?;
+        let reply = self
+            .page
+            .call("Storage.getCookies", JsonValue::Object(Vec::new()))?;
         let mut out = Vec::new();
         if let Some(items) = reply.get("cookies").and_then(|c| c.as_array()) {
             for item in items {
@@ -845,11 +881,10 @@ impl CdpPage {
     pub fn add_cookie(&self, cookie: &Cookie) -> Result<(), String> {
         self.page.call(
             "Storage.setCookies",
-            serde_json::json!({ "cookies": [{
-                "name": cookie.name, "value": cookie.value,
-                "domain": cookie.domain, "path": cookie.path,
-                "secure": cookie.secure, "httpOnly": cookie.http_only,
-            }] }),
+            JsonValue::Object(vec![(
+                "cookies".to_string(),
+                JsonValue::Array(vec![cookie.to_json_value()]),
+            )]),
         )?;
         Ok(())
     }
@@ -858,7 +893,11 @@ impl CdpPage {
     pub fn delete_cookie(&self, domain: &str, path: &str, name: &str) -> Result<(), String> {
         self.page.call(
             "Storage.deleteCookies",
-            serde_json::json!({ "name": name, "domain": domain, "path": path }),
+            JsonValue::Object(vec![
+                ("name".to_string(), JsonValue::Str(name.to_string())),
+                ("domain".to_string(), JsonValue::Str(domain.to_string())),
+                ("path".to_string(), JsonValue::Str(path.to_string())),
+            ]),
         )?;
         Ok(())
     }
@@ -866,14 +905,19 @@ impl CdpPage {
     /// Clear cookies and/or cache.
     pub fn clear_data(&self, cookies: bool, cache: bool, origin: Option<&str>) -> Result<(), String> {
         if cookies {
-            self.page.call("Storage.clearCookies", serde_json::json!({}))?;
+            self.page
+                .call("Storage.clearCookies", JsonValue::Object(Vec::new()))?;
         }
         if cache {
-            self.page.call("Network.clearBrowserCache", serde_json::json!({}))?;
+            self.page
+                .call("Network.clearBrowserCache", JsonValue::Object(Vec::new()))?;
             if let Some(origin) = origin {
                 let _ = self.page.call(
                     "Storage.clearDataForOrigin",
-                    serde_json::json!({ "origin": origin, "storageTypes": "all" }),
+                    JsonValue::Object(vec![
+                        ("origin".to_string(), JsonValue::Str(origin.to_string())),
+                        ("storageTypes".to_string(), JsonValue::Str("all".to_string())),
+                    ]),
                 );
             }
         }
@@ -1049,10 +1093,17 @@ mod tests {
 
     #[test]
     fn call_line_shape() {
-        let line = method_call(3, "Page.navigate", &serde_json::json!({ "url": "https://x.test" }));
-        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["id"], 3);
-        assert_eq!(value["method"], "Page.navigate");
+        let params = JsonValue::Object(vec![(
+            "url".to_string(),
+            JsonValue::Str("https://x.test".to_string()),
+        )]);
+        let line = method_call(3, "Page.navigate", &params);
+        let value = JsonValue::parse(&line).unwrap();
+        assert_eq!(value.get("id").and_then(|v| v.as_i64()), Some(3));
+        assert_eq!(
+            value.get("method").and_then(|v| v.as_str()),
+            Some("Page.navigate")
+        );
     }
 
     #[test]
@@ -1074,24 +1125,33 @@ mod tests {
 
     #[test]
     fn remote_objects_map_to_json() {
-        let v = remote_to_json(&serde_json::json!({ "type": "string", "value": "hi" }));
-        assert_eq!(v, serde_json::json!("hi"));
-        let v = remote_to_json(&serde_json::json!({ "type": "undefined" }));
-        assert_eq!(v, serde_json::Value::Null);
-        let v = remote_to_json(&serde_json::json!({ "type": "number", "unserializableValue": "NaN" }));
-        assert_eq!(v, serde_json::Value::Null);
-        let v = remote_to_json(&serde_json::json!({ "type": "object", "subtype": "null", "value": null }));
-        assert_eq!(v, serde_json::Value::Null);
+        let v = remote_to_json(
+            &JsonValue::parse(r#"{"type": "string", "value": "hi"}"#).unwrap(),
+        );
+        assert_eq!(v, JsonValue::Str("hi".to_string()));
+        let v = remote_to_json(&JsonValue::parse(r#"{"type": "undefined"}"#).unwrap());
+        assert_eq!(v, JsonValue::Null);
+        let v = remote_to_json(
+            &JsonValue::parse(r#"{"type": "number", "unserializableValue": "NaN"}"#).unwrap(),
+        );
+        assert_eq!(v, JsonValue::Null);
+        let v = remote_to_json(
+            &JsonValue::parse(r#"{"type": "object", "subtype": "null", "value": null}"#).unwrap(),
+        );
+        assert_eq!(v, JsonValue::Null);
     }
 
     #[test]
     fn target_picking() {
-        let list = serde_json::json!([
-            { "type": "browser", "webSocketDebuggerUrl": "ws://b" },
-            { "type": "page", "webSocketDebuggerUrl": "ws://p" },
-        ]);
+        let list = JsonValue::parse(
+            r#"[
+                { "type": "browser", "webSocketDebuggerUrl": "ws://b" },
+                { "type": "page", "webSocketDebuggerUrl": "ws://p" }
+            ]"#,
+        )
+        .unwrap();
         assert_eq!(pick_page_target(&list).as_deref(), Some("ws://p"));
-        assert!(pick_page_target(&serde_json::json!([])).is_none());
+        assert!(pick_page_target(&JsonValue::parse("[]").unwrap()).is_none());
     }
 
     #[test]

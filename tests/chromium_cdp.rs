@@ -93,8 +93,9 @@ fn chromium_end_to_end() {
     );
 
     // Real JavaScript inside the Chromium sandbox.
+    use foundation::serialization::JsonValue;
     let result = view.evaluate_javascript("1+1").unwrap();
-    assert_eq!(result, serde_json::json!(2));
+    assert_eq!(result, JsonValue::Integer(2));
     let title = view.evaluate_javascript("document.title").unwrap();
-    assert_eq!(title, serde_json::json!("Hello"));
+    assert_eq!(title, JsonValue::Str("Hello".to_string()));
 }

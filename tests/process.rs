@@ -48,7 +48,7 @@ fn helper_roundtrip() {
 
     // JavaScript round-trips through the id correlation.
     let result = view.evaluate_javascript("document.title").unwrap();
-    assert_eq!(result, serde_json::Value::Null);
+    assert_eq!(result, foundation::serialization::JsonValue::Null);
 
     // Cookie store round-trips.
     let cookie = webkit::Cookie::new("session", "abc", "example.com");

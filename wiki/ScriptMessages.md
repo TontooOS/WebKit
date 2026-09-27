@@ -49,12 +49,10 @@ let web_view = WebView::new(config).unwrap();
 
 ### How it works
 
-- Each handler is registered with the engine's `UserContentManager` and
-  connected through the detailed GLib signal
-  `script-message-received::<name>`, so handlers dispatch by name without a
-  global match loop.
-- The payload is a `javascriptcore6::Value` converted to JSON with the same
-  mapping described in [JavaScript.md](JavaScript.md).
+- Each handler is registered with the engine and dispatches by name
+  without a global match loop.
+- The payload is a Foundation `JsonValue` with the same mapping described
+  in [JavaScript.md](JavaScript.md).
 - If a name is registered twice, the second registration is skipped.
 
 ### Delegate alternative

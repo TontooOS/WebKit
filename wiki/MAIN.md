@@ -5,9 +5,9 @@ WebKit design philosophy with a `WebView` widget, a `WebKitConfiguration`
 object (start URL, settings, user scripts, message handlers, data store),
 navigation and view delegates, and a C FFI for non-Rust consumers. The
 default backend is engine-neutral (WPE WebKit out-of-process; mock frames
-until the helper lands) and blits into TontooUI as a Vello texture, so
-there is no Chromium code and no GTK dependency in the stack. The legacy
-WebKitGTK backend stays available behind the `gtk-backend` cargo feature.
+until the helper lands) and blits into TontooUI as a Vello texture. An
+optional Chromium renderer drives real pages over CDP. There is no GTK
+dependency in the stack.
 
 - Repository: tontoo-os/TontooLibs/WebKit
 - License: MIT
@@ -29,8 +29,7 @@ WebKitGTK backend stays available behind the `gtk-backend` cargo feature.
 | Downloads | [Downloads.md](Downloads.md) | Download delegate and save-location handling |
 | DialogsAndPermissions | [DialogsAndPermissions.md](DialogsAndPermissions.md) | JS dialogs and permission requests |
 | Geolocation | [Geolocation.md](Geolocation.md) | Page geolocation backed by CoreLocation |
-| FFI | [Ffi.md](Ffi.md) | C APIs: `webkit.h` (GTK) and `webkit_vello.h` (Vello) |
-| UIKit | [UIKit.md](UIKit.md) | Legacy GTK embedding shim (deprecated) |
+| FFI | [Ffi.md](Ffi.md) | C API: `webkit_vello.h` |
 | Backend | [Backend.md](Backend.md) | Engine trait, WPE plan, cargo features, IPC |
 
 ## Quick Start
@@ -64,11 +63,8 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
   |     +-- WebViewDelegate / WebNavigationDelegate / DownloadDelegate
   |     +-- Vello C ABI (ffi_vello.rs, Headers/webkit_vello.h)
   |
-  +-- WebSettings / WebScript / ScriptMessageHandler (serializable)
+  +-- WebSettings / WebScript / ScriptMessageHandler
   +-- TontooUI: WebViewContent (tontooui::View, texture blit + input)
-  |
-  +-- Legacy (feature gtk-backend): GtkWebView (WebKitGTK widget),
-  |     CookieManager, WebsiteDataStore, C FFI, UIKit shim
 ```
 
 ## Performance Notes
@@ -83,9 +79,6 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
 - `evaluate_javascript` blocks the UI thread until the engine answers. Use
   `evaluate_javascript_async` while the main loop is running to keep
   rendering responsive.
-- Script message handlers are connected through detailed GLib signals
-  (`script-message-received::<name>`), so multiple handlers dispatch by name
-  without a global match loop.
 - The `cdylib` and `rlib` targets share one code base; the FFI layer is only
   active in the C-facing build.
 
@@ -113,19 +106,22 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
   executable (cargo `examples/`/`deps/` layouts), so the demos find the
   helper after one `cargo build`. `cargo run --example` alone does not
   build the helper binary.
+- 2026-09-27: GTK backend removed -- `gtk-backend` feature, GTK widgets,
+  `CookieManager`, `WebsiteDataStore`, GTK FFI and UIKit shim deleted;
+  Vello/TontooUI is the only backend. Engine IPC (`EngineCommand` /
+  `EngineEvent`) and CDP messages use Foundation JSON (no serde).
 - 2026-09-26: Full Vello loop -- `tontoo-webengine` helper (line
   protocol, frame files, `--ping` self test), `ProcessEngine` transport
   with helper discovery and mock fallback, JS/cookie id correlation with
   5 s timeout, dialog/permission/download answers through the delegates,
   Vello C ABI (`Headers/webkit_vello.h`, `ffi_vello.rs`), `vello_browser`
   demo (toolbar, address field, progress, status), `tests/process.rs`
-  round-trip. GTK examples ported to pure GTK4 (`GtkWebView`).
+  round-trip.
 - 2026-09-26: Vello backend split -- backend-neutral `WebView`
   (`WebEngine` trait, `SharedFrame`, `EngineCommand`/`EngineEvent`,
   `MockEngine`), `WebViewContent` for TontooUI texture blit, `vello`
-  (default) and `gtk-backend` cargo features, GTK/FFI/cookie/data-store
-  code gated behind `gtk-backend`, `uikit` dependency removed,
-  `vello_webview` example. WPE helper process is planned, not shipped.
+  (default) cargo feature, `vello_webview` example. WPE helper process
+  is planned, not shipped.
 
 - 2026-08-21: Geolocation -- `attach_core_location` feeds page positions
   from CoreLocation (GPS/WiFi/IP) through the engine geolocation manager;

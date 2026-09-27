@@ -11,7 +11,7 @@ pub enum WebKitError {
     NavigationFailed(String),
     /// JavaScript evaluation failed.
     Javascript(String),
-    /// A WebKitGTK engine-level error.
+    /// An engine-level error.
     Engine(String),
     /// The web view has no usable settings object.
     NoSettings,
@@ -31,15 +31,8 @@ impl fmt::Display for WebKitError {
 
 impl std::error::Error for WebKitError {}
 
-#[cfg(feature = "gtk-backend")]
-impl From<glib::Error> for WebKitError {
-    fn from(e: glib::Error) -> Self {
-        WebKitError::Engine(e.to_string())
-    }
-}
-
-impl From<serde_json::Error> for WebKitError {
-    fn from(e: serde_json::Error) -> Self {
+impl From<foundation::error::FoundationError> for WebKitError {
+    fn from(e: foundation::error::FoundationError) -> Self {
         WebKitError::Engine(format!("json: {e}"))
     }
 }

@@ -43,7 +43,7 @@ pub trait WebViewDelegate {
     fn load_started(&mut self, url: Option<&str>) {}
     fn load_finished(&mut self, url: Option<&str>) {}
     fn load_failed(&mut self, url: Option<&str>, error: &str) {}
-    fn script_message(&mut self, name: &str, body: serde_json::Value) {}
+    fn script_message(&mut self, name: &str, body: JsonValue) {}
     fn ready_to_show(&mut self) {}
 }
 ```
@@ -79,8 +79,7 @@ web_view.set_navigation_delegate(Box::new(MyNavigation));
   `decide_policy` for `PolicyAction::NewWindow` to reject or reroute them.
 - Load failures are reported only through `navigation_failed` /
   `load_failed`; the `LoadEvent::Failed` state is synthesized from the
-  engine's failure signal because WebKitGTK has no separate "failed" load
-  event.
+  engine's failure signal.
 
 ## Cross References
 

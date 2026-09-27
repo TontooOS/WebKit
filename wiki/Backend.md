@@ -15,7 +15,7 @@ WebView (src/view.rs, no toolkit dependency)
   |     |     +-- ChromiumRenderer (CDP, real pages in the sandbox)
   |     +-- CefOsr (planned) ... CEF offscreen rendering, same protocol
   |-- SharedFrame { seq, width, height, rgba }
-  +-- EngineCommand / EngineEvent (serializable IPC vocabulary)
+  +-- EngineCommand / EngineEvent (JSON IPC vocabulary, manual encoding)
 ```
 
 The view owns no widget. It sends [`EngineCommand`] values to the engine
@@ -30,12 +30,9 @@ applied with `pump_events`, which every UI calls once per frame.
 | Feature | Default | Description |
 |---|---|---|
 | `vello` | yes | Backend-neutral `WebView`, `WebViewContent` for TontooUI |
-| `gtk-backend` | no | Legacy WebKitGTK `GtkWebView` plus C FFI and cookie/data-store managers |
+| `chromium` | yes | Headless Chromium over CDP (real pages, screenshots, JS) |
 
-With both features enabled the legacy names keep working (`WebView` is
-the GTK view) and the new view is exported as `VelloWebView`,
-`VelloWebViewBuilder` and `VelloWebViewContent`. Without `gtk-backend`
-`WebView` is the new engine view.
+`WebView` is the engine view in all configurations.
 
 ## API
 
@@ -104,8 +101,10 @@ pub fn find_helper() -> Result<PathBuf, WebKitError>
 
 ### `EngineCommand` / `EngineEvent`
 
-Serializable enums forming the IPC vocabulary between the UI process and
-the engine process. Commands cover navigation (`LoadUrl`, `LoadHtml`,
+JSON enums forming the IPC vocabulary between the UI process and the
+engine process (`to_json_string` / `from_json_str` in `engine.rs`, same
+shape as the former serde encoding). Commands cover navigation
+(`LoadUrl`, `LoadHtml`,
 `Reload`, `GoBack`, `GoForward`, `Stop`), scripting (`EvaluateJs`),
 sizing (`Resize`) and input (`MouseDown`, `MouseUp`, `MouseMove`,
 `Scroll`, `KeyText`). Events report frames (`FrameReady` carries seq and
@@ -171,7 +170,7 @@ our processes only ever see screenshots, JSON values and cookies.
   transitions (not 60 fps); interactive smoothness is the reason the
   CEF path below exists.
 - `evaluate_javascript` and `list_cookies` block up to `JS_TIMEOUT`
-  (60 s) while pumping events, matching the legacy GTK behavior.
+  (60 s) while pumping events.
 
 | Env var | Meaning |
 |---|---|
@@ -269,6 +268,5 @@ TONTOO_WEBENGINE_BIN=../../target/debug/tontoo-webengine cargo test --test proce
 ## Cross References
 
 - [WebView.md](WebView.md) – the backend-neutral view widget and its methods
-- [UIKit.md](UIKit.md) – legacy GTK embedding (deprecated shim)
-- [Ffi.md](Ffi.md) – C APIs (`webkit.h` for GTK, `webkit_vello.h` for Vello)
-- [Settings.md](Settings.md) – settings are serializable for the engine helper
+- [Ffi.md](Ffi.md) – C API (`webkit_vello.h`)
+- [Settings.md](Settings.md) – engine settings

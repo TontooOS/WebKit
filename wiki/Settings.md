@@ -53,9 +53,8 @@ shares one cache pool.
 | `WebBrowser` | Standard browser caching |
 | `PrimaryWebBrowser` | Maps to the engine's most aggressive mode (`WebBrowser`) |
 
-> **Note:** WebKitGTK only offers three cache models. `PrimaryWebBrowser`
-> is kept for API compatibility with Apple WebKit and maps to the same
-> engine value as `WebBrowser`.
+> **Note:** `PrimaryWebBrowser` is kept for API compatibility with Apple
+> WebKit and behaves like `WebBrowser`.
 
 ## Usage
 
