@@ -17,4 +17,4 @@ sdk = { path = "/Library/System/sdk", features = ["WebKit"] }
 
 ## License
 
-MIT
+TCL v26.1
