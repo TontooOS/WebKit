@@ -23,7 +23,7 @@ extern "C" {
 typedef struct TontooVelloView TontooVelloView;
 
 /*
- * Framework version as a static string, e.g. "26.1.0".
+ * Framework version as a static string, e.g. "27.0.0".
  */
 const char *tontoo_vello_version(void);
 

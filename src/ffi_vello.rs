@@ -112,7 +112,7 @@ fn handle(view: *mut TontooVelloView) -> Option<&'static TontooVelloView> {
 /// Framework version as a static C string.
 #[no_mangle]
 pub extern "C" fn tontoo_vello_version() -> *const c_char {
-    b"26.1.0\0".as_ptr() as *const c_char
+    b"27.0.0\0".as_ptr() as *const c_char
 }
 
 /// Create a Vello web view from a JSON configuration string.
