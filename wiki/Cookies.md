@@ -64,9 +64,13 @@ Deletes the cookie matching domain, path and name.
 | `path` | `String` | Path the cookie belongs to (default `/`) |
 | `secure` | `bool` | Only sent over secure connections |
 | `http_only` | `bool` | Hidden from JavaScript (`HttpOnly`) |
+| `expires` | `Option<i64>` | Expiry as unix seconds; `None` = session cookie |
 
 Builder methods: `Cookie::new(name, value, domain)`, `.path(...)`,
-`.secure(...)`, `.http_only(...)`.
+`.secure(...)`, `.http_only(...)`, `.expires(Some(<unix seconds>))`.
+
+On Gecko these map to the BiDi `storage.*` commands (`storage.setCookie`
+carries `expiry` in seconds). See [Gecko.md](Gecko.md).
 
 ## Usage / Example
 
@@ -89,3 +93,4 @@ web_view.delete_cookie("example.com", "/", "session");
 - [DataStore.md](DataStore.md) -- where cookies live, private browsing,
   clearing website data
 - [WebView.md](WebView.md) -- creating views
+- [Gecko.md](Gecko.md) -- the `storage.*` mapping

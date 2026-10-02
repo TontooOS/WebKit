@@ -3,9 +3,9 @@ name = "webkit"
 version = "27.0.0"
 edition = "2021"
 license = "TCL"
-description = "Web content framework for TontooOS - Apple WebKit-style API backed by WebKitGTK"
+description = "Web content framework for TontooOS - Apple WebKit-style API backed by Gecko"
 readme = "README.md"
-keywords = ["tontoo", "webkit", "web", "browser", "ui"]
+keywords = ["tontoo", "webkit", "web", "browser", "ui", "gecko", "firefox"]
 categories = ["gui", "api-bindings"]
 
 [dependencies]
@@ -16,19 +16,20 @@ corelocation = { path = "../CoreLocation" }
 tontooui = { path = "../TontooUI", optional = true }
 vello = { version = "0.10", optional = true }
 
-# Chromium path: headless Chromium driven over CDP (DevTools protocol).
-# Pure Rust (websocket + PNG decode), needs a Chromium binary at RUNTIME
-# only -- page JS runs inside the real Chromium sandbox. The helper can
-# provision and auto-update a Chrome-for-Testing build itself (ureq+zip).
+# Gecko path: headful Firefox driven over WebDriver BiDi. Pure Rust
+# (tungstenite websocket), needs a Firefox binary at RUNTIME only -- the
+# browser renders and runs page JS itself, including WebExtensions. The
+# helper can provision and auto-update a Firefox ESR build itself
+# (ureq + xz/tar, Linux) when the host has no Firefox.
 tungstenite = { version = "0.26", optional = true }
-image = { version = "0.25", optional = true }
 ureq = { version = "3", optional = true }
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+lzma-rs = { version = "0.3", optional = true }
+tar = { version = "0.4", optional = true }
 
 [features]
-default = ["vello", "chromium"]
+default = ["vello", "gecko"]
 vello = ["dep:tontooui", "dep:vello"]
-chromium = ["dep:tungstenite", "dep:image", "dep:ureq", "dep:zip"]
+gecko = ["dep:tungstenite", "dep:ureq", "dep:lzma-rs", "dep:tar"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -46,3 +47,8 @@ required-features = ["vello"]
 name = "vello_browser"
 path = "examples/vello_browser.rs"
 required-features = ["vello"]
+
+[[example]]
+name = "tontoo_browser"
+path = "examples/tontoo_browser.rs"
+required-features = ["vello", "gecko"]

@@ -1,15 +1,17 @@
 //! Backend-neutral web engine abstraction.
 //!
 //! [`WebEngine`] decouples the public [`crate::WebView`] API from the HTML
-//! engine underneath. The default build targets WPE WebKit running in the
-//! out-of-process `tontoo-webengine` helper (Apple WebKit, Wayland-native).
-//! Frames arrive as
-//! BGRA pixel buffers and are blitted as Vello textures, so rounded corners
-//! and LiquidGlass keep working.
+//! engine underneath. The production backend is Gecko: the
+//! `tontoo-webengine` helper launches headful Firefox and speaks
+//! WebDriver BiDi to it, so pages render in their own Wayland window at
+//! full frame rate with WebExtensions enabled. Engines that produce pixel
+//! buffers (the WPE WebKit helper once it lands) publish them as
+//! [`SharedFrame`] and the view blits them as Vello textures, so rounded
+//! corners and LiquidGlass keep working.
 //!
 //! [`MockEngine`] renders a checkerboard without any system web engine. It
 //! exists so the crate, its tests and TontooUI embedding compile and run
-//! before the WPE helper lands.
+//! on hosts without Firefox.
 
 use std::sync::{Arc, RwLock};
 
@@ -167,6 +169,32 @@ pub enum EngineCommand {
         path: String,
         name: String,
     },
+    /// Install a WebExtension from a local `manifest.json` directory or an
+    /// `.xpi` archive (answered by `ExtensionInstalled` / `ExtensionFailed`).
+    InstallExtension {
+        id: u64,
+        path: String,
+    },
+    /// List installed WebExtensions (answered by `Extensions`).
+    ListExtensions {
+        id: u64,
+    },
+    /// Open a new top-level context (`"tab"` or `"window"`), answered by
+    /// `ContextReady`.
+    NewTab {
+        id: u64,
+        kind: String,
+    },
+    /// Close a top-level context, answered by `ContextClosed`.
+    CloseTab {
+        id: u64,
+        context: String,
+    },
+    /// Focus a top-level context so its window comes forward.
+    ActivateTab {
+        id: u64,
+        context: String,
+    },
 }
 
 /// Events sent from the engine process back to the UI.
@@ -239,13 +267,43 @@ pub enum EngineEvent {
         can_back: bool,
         can_forward: bool,
     },
+    /// The engine owns a real desktop window. `pid` identifies it, so a
+    /// host app can look it up through `CoreWindows::list_windows` and
+    /// position, minimize or close it.
+    EngineWindow {
+        pid: u32,
+        kiosk: bool,
+    },
+    /// A new top-level context (tab or window) is available.
+    ContextReady {
+        context: String,
+    },
+    /// A top-level context went away.
+    ContextClosed {
+        context: String,
+    },
+    /// Answer to [`EngineCommand::InstallExtension`].
+    ExtensionInstalled {
+        id: u64,
+        extension: String,
+    },
+    /// Answer to [`EngineCommand::InstallExtension`] on failure.
+    ExtensionFailed {
+        id: u64,
+        error: String,
+    },
+    /// Answer to [`EngineCommand::ListExtensions`].
+    Extensions {
+        id: u64,
+        extensions: Vec<String>,
+    },
     ReadyToShow,
 }
 
 /// The engine side of the web view. Implementations run the HTML engine
-/// (WPE WebKit, Chromium CEF, Servo, or [`MockEngine`] for tests) and must
-/// be safe to drive from the UI thread: every method only enqueues an
-/// [`EngineCommand`] and returns immediately.
+/// (Gecko, WPE WebKit, Chromium CEF, Servo, or [`MockEngine`] for tests)
+/// and must be safe to drive from the UI thread: every method only
+/// enqueues an [`EngineCommand`] and returns immediately.
 pub trait WebEngine: Send + Sync {
     /// Enqueue a command for the engine.
     fn send(&self, command: EngineCommand);
@@ -299,7 +357,7 @@ pub trait WebEngine: Send + Sync {
 ///
 /// Serves a checkerboard frame, records the last URL and answers every
 /// JavaScript evaluation with `null`. Used by unit tests and as a
-/// stand-in until the WPE helper process exists.
+/// stand-in on hosts without Firefox.
 pub struct MockEngine {
     frame: RwLock<Arc<SharedFrame>>,
     url: RwLock<Option<String>>,
@@ -590,6 +648,38 @@ mod protocol {
                         str_field("name", name),
                     ]),
                 ),
+                Self::InstallExtension { id, path } => tagged(
+                    "InstallExtension",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        str_field("path", path),
+                    ]),
+                ),
+                Self::ListExtensions { id } => tagged(
+                    "ListExtensions",
+                    JsonValue::Object(vec![("id".to_string(), JsonValue::Integer(*id as i64))]),
+                ),
+                Self::NewTab { id, kind } => tagged(
+                    "NewTab",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        str_field("kind", kind),
+                    ]),
+                ),
+                Self::CloseTab { id, context } => tagged(
+                    "CloseTab",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        str_field("context", context),
+                    ]),
+                ),
+                Self::ActivateTab { id, context } => tagged(
+                    "ActivateTab",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        str_field("context", context),
+                    ]),
+                ),
             }
         }
 
@@ -694,6 +784,25 @@ mod protocol {
                     domain: req_str(payload, "domain")?,
                     path: req_str(payload, "path")?,
                     name: req_str(payload, "name")?,
+                }),
+                "InstallExtension" => Ok(Self::InstallExtension {
+                    id: req_u64(payload, "id")?,
+                    path: req_str(payload, "path")?,
+                }),
+                "ListExtensions" => Ok(Self::ListExtensions {
+                    id: req_u64(payload, "id")?,
+                }),
+                "NewTab" => Ok(Self::NewTab {
+                    id: req_u64(payload, "id")?,
+                    kind: req_str(payload, "kind")?,
+                }),
+                "CloseTab" => Ok(Self::CloseTab {
+                    id: req_u64(payload, "id")?,
+                    context: req_str(payload, "context")?,
+                }),
+                "ActivateTab" => Ok(Self::ActivateTab {
+                    id: req_u64(payload, "id")?,
+                    context: req_str(payload, "context")?,
                 }),
                 other => Err(format!("unknown command `{}`", other)),
             }
@@ -812,6 +921,47 @@ mod protocol {
                         ("can_forward".to_string(), JsonValue::Bool(*can_forward)),
                     ]),
                 ),
+                Self::EngineWindow { pid, kiosk } => tagged(
+                    "EngineWindow",
+                    JsonValue::Object(vec![
+                        ("pid".to_string(), JsonValue::Integer(*pid as i64)),
+                        ("kiosk".to_string(), JsonValue::Bool(*kiosk)),
+                    ]),
+                ),
+                Self::ContextReady { context } => tagged(
+                    "ContextReady",
+                    JsonValue::Object(vec![str_field("context", context)]),
+                ),
+                Self::ContextClosed { context } => tagged(
+                    "ContextClosed",
+                    JsonValue::Object(vec![str_field("context", context)]),
+                ),
+                Self::ExtensionInstalled { id, extension } => tagged(
+                    "ExtensionInstalled",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        str_field("extension", extension),
+                    ]),
+                ),
+                Self::ExtensionFailed { id, error } => tagged(
+                    "ExtensionFailed",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        str_field("error", error),
+                    ]),
+                ),
+                Self::Extensions { id, extensions } => tagged(
+                    "Extensions",
+                    JsonValue::Object(vec![
+                        ("id".to_string(), JsonValue::Integer(*id as i64)),
+                        (
+                            "extensions".to_string(),
+                            JsonValue::Array(
+                                extensions.iter().map(|e| JsonValue::Str(e.clone())).collect(),
+                            ),
+                        ),
+                    ]),
+                ),
                 Self::ReadyToShow => JsonValue::Str("ReadyToShow".to_string()),
             }
         }
@@ -914,6 +1064,37 @@ mod protocol {
                     can_back: req_bool(payload, "can_back")?,
                     can_forward: req_bool(payload, "can_forward")?,
                 }),
+                "EngineWindow" => Ok(Self::EngineWindow {
+                    pid: req_u64(payload, "pid")? as u32,
+                    kiosk: req_bool(payload, "kiosk")?,
+                }),
+                "ContextReady" => Ok(Self::ContextReady {
+                    context: req_str(payload, "context")?,
+                }),
+                "ContextClosed" => Ok(Self::ContextClosed {
+                    context: req_str(payload, "context")?,
+                }),
+                "ExtensionInstalled" => Ok(Self::ExtensionInstalled {
+                    id: req_u64(payload, "id")?,
+                    extension: req_str(payload, "extension")?,
+                }),
+                "ExtensionFailed" => Ok(Self::ExtensionFailed {
+                    id: req_u64(payload, "id")?,
+                    error: req_str(payload, "error")?,
+                }),
+                "Extensions" => {
+                    let list = payload
+                        .get("extensions")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| err_missing("extensions"))?;
+                    Ok(Self::Extensions {
+                        id: req_u64(payload, "id")?,
+                        extensions: list
+                            .iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect(),
+                    })
+                }
                 other => Err(format!("unknown event `{}`", other)),
             }
         }

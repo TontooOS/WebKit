@@ -9,13 +9,34 @@
 //! ## Backends
 //!
 //! * Default (`vello` feature): backend-neutral [`view::WebView`] driving a
-//!   [`engine::WebEngine`] (WPE WebKit out-of-process once
-//!   `tontoo-webengine` lands, [`engine::MockEngine`] until then). Frames
-//!   are blitted as Vello textures via
-//!   [`tontooui_view::WebViewContent`], so rounded corners and LiquidGlass
-//!   keep working in TontooUI windows.
-//! * Optional (`chromium` feature): headless Chromium over CDP for real
-//!   page rendering inside the Chromium sandbox.
+//!   [`engine::WebEngine`]. The `tontoo-webengine` helper runs headful
+//!   Firefox and speaks WebDriver BiDi to it
+//!   ([`gecko::GeckoPage`]), so pages render in their own Wayland window
+//!   with WebExtensions enabled; [`engine::MockEngine`] stands in on hosts
+//!   without Firefox.
+//! * Engines that produce pixel buffers publish them as
+//!   [`engine::SharedFrame`], which
+//!   [`tontooui_view::WebViewContent`] blits as a Vello texture, so rounded
+//!   corners and LiquidGlass keep working in TontooUI windows.
+//!
+//! ## Quick Start (Gecko)
+//!
+//! ```rust,no_run
+//! use webkit::{GeckoOptions, WebEngine, WebView, WebKitConfiguration};
+//!
+//! fn main() {
+//!     let engine = webkit::GeckoEngine::launch(GeckoOptions::default())
+//!         .expect("failed to launch Firefox");
+//!
+//!     let view = WebView::with_engine(
+//!     WebKitConfiguration::new().start_url("https://tontoo-os.github.io"),
+//!     std::sync::Arc::new(webkit::GeckoEngine::launch(
+//!         webkit::GeckoOptions::default(),
+//!     ).expect("failed to launch Firefox")),
+//! ).expect("failed to create web view");
+//! view.load_url("https://tontoo-os.github.io").unwrap();
+//! }
+//! ```
 //!
 //! ## Quick Start (Vello)
 //!
@@ -52,16 +73,16 @@
 pub mod config;
 pub mod cookie;
 pub mod data_store;
-#[cfg(feature = "chromium")]
-pub mod chromium;
-#[cfg(feature = "chromium")]
-pub mod chrome_provision;
 pub mod delegate;
 pub mod download;
 pub mod engine;
 pub mod error;
 #[cfg(feature = "vello")]
 pub mod ffi_vello;
+#[cfg(feature = "gecko")]
+pub mod gecko;
+#[cfg(feature = "gecko")]
+pub mod gecko_provision;
 pub mod geolocation;
 pub mod lang;
 pub mod navigation;
@@ -84,6 +105,13 @@ pub use delegate::{
 pub use download::{DefaultDownloadDelegate, DownloadDelegate, WebDownload};
 pub use engine::{EngineCommand, EngineEvent, MockEngine, SharedFrame, WebEngine};
 pub use error::WebKitError;
+#[cfg(feature = "gecko")]
+pub use gecko::{
+    BidiEvent, ExtensionPolicy, GeckoEngine, GeckoOptions, GeckoPage, find_firefox,
+    write_extension_policy,
+};
+#[cfg(feature = "gecko")]
+pub use gecko_provision::{Channel, ensure_firefox};
 pub use geolocation::attach_core_location;
 pub use navigation::{NavigationAction, NavigationEvent, PolicyAction, WebNavigationDelegate};
 pub use script::{ScriptFrameInjection, ScriptInjectionTime, ScriptMessageHandler, WebScript};
@@ -108,6 +136,11 @@ pub mod prelude {
         WebSettingsBuilder,
     };
     pub use crate::{WebsiteData, WebsiteDataType};
+    #[cfg(feature = "gecko")]
+    pub use crate::{
+        BidiEvent, Channel, ExtensionPolicy, GeckoEngine, GeckoOptions, GeckoPage, find_firefox,
+        write_extension_policy,
+    };
     #[cfg(feature = "vello")]
     pub use crate::{WebView, WebViewBuilder, WebViewContent};
     pub use crate::WEBKIT_VERSION;

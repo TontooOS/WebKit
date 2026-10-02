@@ -48,6 +48,15 @@ pub trait WebViewDelegate {
     fn permission_request(&mut self, _kind: PermissionKind) -> PermissionDecision {
         PermissionDecision::Deny
     }
+
+    /// A WebExtension was installed or updated by the engine itself
+    /// (for example through its about:addons page). `id` is the Firefox
+    /// extension id.
+    ///
+    /// Installations requested through
+    /// [`crate::WebView::install_extension`] answer that call instead and
+    /// are not reported here.
+    fn extension_installed(&mut self, _id: &str) {}
 }
 
 /// Default delegate used when the caller does not provide one.

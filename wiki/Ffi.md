@@ -63,4 +63,4 @@ if (tontoo_vello_view_frame_size(view, &w, &h)) {
 - [WebView.md](WebView.md) -- the underlying Rust API
 - [Configuration.md](Configuration.md) -- the JSON shape
 - [JavaScript.md](JavaScript.md) -- result mapping
-- [Backend.md](Backend.md) -- engine trait, helper protocol, WPE plan
+- [Backend.md](Backend.md) -- engine trait, helper protocol, Gecko vs mock

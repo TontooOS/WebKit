@@ -42,6 +42,9 @@ pub struct Cookie {
     pub secure: bool,
     /// Whether the cookie is hidden from JavaScript (`HttpOnly`).
     pub http_only: bool,
+    /// Expiry as unix seconds, or `None` for a session cookie that dies
+    /// with the engine.
+    pub expires: Option<i64>,
 }
 
 impl Cookie {
@@ -54,6 +57,7 @@ impl Cookie {
             path: "/".into(),
             secure: false,
             http_only: false,
+            expires: None,
         }
     }
 
@@ -74,6 +78,12 @@ impl Cookie {
         self.http_only = http_only;
         self
     }
+
+    /// Set the expiry as unix seconds (`None` = session cookie).
+    pub fn expires(mut self, expires: Option<i64>) -> Self {
+        self.expires = expires;
+        self
+    }
 }
 
 impl Cookie {
@@ -87,6 +97,13 @@ impl Cookie {
             ("path".to_string(), JsonValue::Str(self.path.clone())),
             ("secure".to_string(), JsonValue::Bool(self.secure)),
             ("httpOnly".to_string(), JsonValue::Bool(self.http_only)),
+            (
+                "expires".to_string(),
+                match self.expires {
+                    Some(expires) => JsonValue::Integer(expires),
+                    None => JsonValue::Null,
+                },
+            ),
         ])
     }
 
@@ -115,6 +132,7 @@ impl Cookie {
             },
             secure: bool_field("secure"),
             http_only: bool_field("httpOnly"),
+            expires: doc.get("expires").and_then(|v| v.as_i64()),
         }
     }
 }

@@ -4,18 +4,19 @@
 //! (`C {...}`) on stdin, JSON events (`E {...}`) on stdout, BGRA pixels in
 //! `<slot-dir>/frame.bgra` announced by `FrameReady`.
 //!
-//! Renderer selection (`--renderer=mock|chromium|auto`, default `auto`):
+//! Renderer selection (`--renderer=mock|gecko|auto`, default `auto`):
 //!
-//! * `chromium` (feature `chromium`, Chromium binary present): real pages
-//!   inside the Chromium sandbox via the DevTools protocol -- navigation,
-//!   screenshots, input, JavaScript results, cookies, downloads, dialogs.
+//! * `gecko` (feature `gecko`, Firefox binary present): a real headful
+//!   Firefox driven over WebDriver BiDi -- navigation, history, input,
+//!   JavaScript results, cookies, downloads, dialogs and WebExtensions.
+//!   Firefox owns its own Wayland window, so no frames are produced; the
+//!   protocol reports `EngineWindow { pid }` instead.
 //! * `mock`: animated software placeholder with a mock cookie jar. Used
-//!   when no Chromium binary exists and for headless self tests.
+//!   when no Firefox binary exists and for headless self tests.
 //!
 //! Usage: `tontoo-webengine --slot-dir <dir> [--ping]
-//! [--renderer=...]`.
+//! [--renderer=...] [--headless] [--private]`.
 
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::{Receiver, sync_channel};
 
@@ -55,7 +56,7 @@ impl Emitter {
 trait Renderer {
     /// Handle one UI command.
     fn handle(&mut self, command: EngineCommand, emit: &mut Emitter);
-    /// Drain asynchronous engine events (CDP callbacks). Mock is a no-op.
+    /// Drain asynchronous engine events. Mock is a no-op.
     fn poll(&mut self, emit: &mut Emitter);
     /// Render one frame immediately (`--ping`).
     fn ping(&mut self, emit: &mut Emitter);
@@ -210,6 +211,27 @@ impl Renderer for MockRenderer {
                 self.cookies
                     .retain(|c| !(c.domain == domain && c.path == path && c.name == name));
             }
+            EngineCommand::InstallExtension { id, path } => {
+                emit.emit(&EngineEvent::ExtensionFailed {
+                    id,
+                    error: format!("mock renderer cannot install {path}"),
+                });
+            }
+            EngineCommand::ListExtensions { id } => {
+                emit.emit(&EngineEvent::Extensions {
+                    id,
+                    extensions: Vec::new(),
+                });
+            }
+            EngineCommand::NewTab { kind, .. } => {
+                let context = format!("mock-{kind}-{}", self.tick);
+                self.tick += 1;
+                emit.emit(&EngineEvent::ContextReady { context });
+            }
+            EngineCommand::CloseTab { context, .. } => {
+                emit.emit(&EngineEvent::ContextClosed { context });
+            }
+            EngineCommand::ActivateTab { .. } => {}
         }
     }
 
@@ -222,318 +244,79 @@ impl Renderer for MockRenderer {
 }
 
 // ---------------------------------------------------------------------------
-// Chromium renderer (real pages in the Chromium sandbox)
+// Gecko renderer (real pages in a headful Firefox)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "chromium")]
-struct ChromiumRenderer {
-    page: webkit::chromium::CdpPage,
-    events: Receiver<webkit::chromium::CdpEvent>,
-    download_dir: std::path::PathBuf,
-    url: Option<String>,
-    last_pos: (f64, f64),
-    next_id: u64,
-    /// Engine download id -> (CDP guid, chosen destination or None).
-    downloads: HashMap<u64, (String, Option<String>)>,
-    guids: HashMap<String, u64>,
+#[cfg(feature = "gecko")]
+struct GeckoRenderer {
+    page: webkit::GeckoPage,
+    state: webkit::gecko::GeckoState,
+    events: Receiver<webkit::BidiEvent>,
 }
 
-#[cfg(feature = "chromium")]
-impl ChromiumRenderer {
-    fn launch(download_dir: std::path::PathBuf) -> Result<Self, String> {
-        let (page, events) = webkit::chromium::CdpPage::launch(download_dir.clone())?;
+#[cfg(feature = "gecko")]
+impl GeckoRenderer {
+    fn launch(
+        download_dir: std::path::PathBuf,
+        headless: bool,
+        private: bool,
+        emit: &mut Emitter,
+    ) -> Result<Self, String> {
+        let options = webkit::GeckoOptions {
+            kiosk: false,
+            headless,
+            private,
+            download_dir,
+            start_url: Some("about:blank".to_string()),
+            // The background updater owns provisioning here, so the mock
+            // renderer can take over immediately.
+            provision: false,
+            extensions: Vec::new(),
+        };
+        let (page, events) = webkit::GeckoPage::launch(options.clone())?;
+        let state = webkit::gecko::GeckoState::new(&page, options.download_dir, false);
+        // The initial window exists before the event subscription, so
+        // report it here.
+        emit.emit(&EngineEvent::EngineWindow {
+            pid: page.pid(),
+            kiosk: false,
+        });
+        emit.emit(&EngineEvent::ReadyToShow);
         Ok(Self {
             page,
+            state,
             events,
-            download_dir,
-            url: None,
-            last_pos: (0.0, 0.0),
-            next_id: 1,
-            downloads: HashMap::new(),
-            guids: HashMap::new(),
         })
-    }
-
-    fn capture(&self, emit: &mut Emitter) {
-        match self.page.capture() {
-            Ok((bgra, w, h)) => {
-                emit.frame(&bgra, w, h);
-                if let Ok((back, fwd)) = self.page.history_state() {
-                    emit.emit(&EngineEvent::History {
-                        can_back: back,
-                        can_forward: fwd,
-                    });
-                }
-            }
-            Err(e) => eprintln!("chromium: capture failed ({e})"),
-        }
-    }
-
-    fn finish_load(&self, url: Option<String>, emit: &mut Emitter) {
-        let title = self.page.title();
-        emit.emit(&EngineEvent::Title(title));
-        emit.emit(&EngineEvent::Progress(1.0));
-        emit.emit(&EngineEvent::LoadFinished(url));
-        emit.emit(&EngineEvent::ReadyToShow);
-        self.capture(emit);
-    }
-
-    fn finish_download(&mut self, id: u64, emit: &mut Emitter) {
-        let Some((guid, dest)) = self.downloads.remove(&id) else {
-            return;
-        };
-        self.guids.remove(&guid);
-        let Some(dest) = dest else {
-            // No destination chosen (delegate cancelled after the fact).
-            emit.emit(&EngineEvent::DownloadFailed {
-                id,
-                error: "cancelled".into(),
-            });
-            return;
-        };
-        // Chrome may suffix collisions (`name (1)`); take the newest match.
-        // Downloaded files land directly in the download dir.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let newest = std::fs::read_dir(&self.download_dir)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.path().is_file())
-                    .filter_map(|e| e.metadata().ok()?.modified().ok().map(|m| (m, e.path())))
-                    .max_by_key(|(m, _)| *m)
-            })
-            .map(|(_, path)| path);
-        match newest {
-            Some(source) => {
-                let moved = std::fs::rename(&source, &dest).or_else(|_| {
-                    std::fs::copy(&source, &dest)
-                        .map(|_| ())
-                        .and_then(|()| std::fs::remove_file(&source))
-                });
-                match moved {
-                    Ok(()) => emit.emit(&EngineEvent::DownloadFinished { id }),
-                    Err(e) => emit.emit(&EngineEvent::DownloadFailed {
-                        id,
-                        error: format!("save failed: {e}"),
-                    }),
-                }
-            }
-            None => emit.emit(&EngineEvent::DownloadFailed {
-                id,
-                error: "download file missing".into(),
-            }),
-        }
     }
 }
 
-#[cfg(feature = "chromium")]
-impl Renderer for ChromiumRenderer {
+#[cfg(feature = "gecko")]
+impl Renderer for GeckoRenderer {
     fn handle(&mut self, command: EngineCommand, emit: &mut Emitter) {
-        match command {
-            EngineCommand::LoadUrl(url) => {
-                self.url = Some(url.clone());
-                emit.emit(&EngineEvent::LoadStarted(Some(url.clone())));
-                emit.emit(&EngineEvent::Url(Some(url.clone())));
-                emit.emit(&EngineEvent::Progress(0.2));
-                if let Err(e) = self.page.navigate(&url) {
-                    emit.emit(&EngineEvent::LoadFailed {
-                        url: Some(url),
-                        error: e,
-                    });
-                }
-            }
-            EngineCommand::LoadHtml { html, .. } => {
-                self.url = None;
-                emit.emit(&EngineEvent::LoadStarted(None));
-                if let Err(e) = self.page.set_document_content(&html) {
-                    emit.emit(&EngineEvent::LoadFailed { url: None, error: e });
-                }
-            }
-            EngineCommand::EvaluateJs { id, script } => {
-                match self.page.evaluate(&script) {
-                    Ok(result) => emit.emit(&EngineEvent::JsResult { id, result }),
-                    Err(e) => {
-                        eprintln!("chromium: evaluate failed ({e})");
-                        emit.emit(&EngineEvent::JsResult {
-                            id,
-                            result: JsonValue::Null,
-                        });
-                    }
-                }
-            }
-            EngineCommand::Resize { width, height, scale } => {
-                if self.page.set_viewport(width, height, scale).is_ok() {
-                    self.capture(emit);
-                }
-            }
-            EngineCommand::MouseDown { x, y } => {
-                self.last_pos = (x, y);
-                let _ = self.page.mouse_move(x, y);
-                let _ = self.page.mouse_button(x, y, true);
-                self.capture(emit);
-            }
-            EngineCommand::MouseUp { x, y } => {
-                self.last_pos = (x, y);
-                let _ = self.page.mouse_button(x, y, false);
-                self.capture(emit);
-            }
-            EngineCommand::MouseMove { x, y } => {
-                self.last_pos = (x, y);
-                let _ = self.page.mouse_move(x, y);
-            }
-            EngineCommand::Scroll { dx, dy } => {
-                let (x, y) = self.last_pos;
-                let _ = self.page.wheel(x, y, dx, dy);
-                self.capture(emit);
-            }
-            EngineCommand::KeyText(text) => {
-                let _ = self.page.insert_text(&text);
-                self.capture(emit);
-            }
-            EngineCommand::SpecialKey { key } => {
-                let _ = self.page.special_key(&key);
-                self.capture(emit);
-            }
-            EngineCommand::Reload => {
-                let _ = self.page.reload(false);
-            }
-            EngineCommand::ReloadBypassCache => {
-                let _ = self.page.reload(true);
-            }
-            EngineCommand::GoBack => {
-                let _ = self.page.go_history(-1);
-            }
-            EngineCommand::GoForward => {
-                let _ = self.page.go_history(1);
-            }
-            EngineCommand::Stop => {
-                let _ = self.page.stop_loading();
-            }
-            EngineCommand::DialogAnswer { confirmed, text, .. } => {
-                let _ = self.page.dialog_answer(confirmed, text.as_deref());
-            }
-            EngineCommand::PermissionAnswer { .. } => {
-                // Chromium auto-denies prompts unless pre-granted; this
-                // driver never pre-grants, so permissions fail closed.
-            }
-            EngineCommand::DownloadDestination { id, path } => {
-                if let Some((guid, slot)) = self.downloads.get_mut(&id) {
-                    if path.is_none() {
-                        let guid = guid.clone();
-                        let _ = self.page.cancel_download(&guid);
-                        self.downloads.remove(&id);
-                        self.guids.remove(&guid);
-                        emit.emit(&EngineEvent::DownloadFailed {
-                            id,
-                            error: "cancelled".into(),
-                        });
-                    } else {
-                        *slot = path;
-                    }
-                }
-            }
-            EngineCommand::CancelDownload { id } => {
-                if let Some((guid, _)) = self.downloads.remove(&id) {
-                    let _ = self.page.cancel_download(&guid);
-                    self.guids.remove(&guid);
-                }
-            }
-            EngineCommand::ClearData { cookies, cache } => {
-                let origin = self.url.clone();
-                let _ = self.page.clear_data(cookies, cache, origin.as_deref());
-            }
-            EngineCommand::ListCookies { id } => {
-                match self.page.list_cookies() {
-                    Ok(cookies) => emit.emit(&EngineEvent::Cookies { id, cookies }),
-                    Err(e) => eprintln!("chromium: cookies failed ({e})"),
-                }
-            }
-            EngineCommand::AddCookie { cookie } => {
-                let _ = self.page.add_cookie(&cookie);
-            }
-            EngineCommand::DeleteCookie { domain, path, name } => {
-                let _ = self.page.delete_cookie(&domain, &path, &name);
-            }
+        let mut out = Vec::new();
+        webkit::gecko::run_command(&self.page, command, &mut self.state, &mut out);
+        for event in &out {
+            emit.emit(event);
         }
     }
 
     fn poll(&mut self, emit: &mut Emitter) {
-        use webkit::chromium::CdpEvent as C;
         while let Ok(event) = self.events.try_recv() {
-            match event {
-                C::Started { url } => {
-                    emit.emit(&EngineEvent::LoadStarted(Some(url)));
-                    emit.emit(&EngineEvent::Progress(0.2));
-                }
-                C::Navigated { url, .. } => {
-                    self.url = Some(url.clone());
-                    emit.emit(&EngineEvent::Url(Some(url)));
-                }
-                C::Loaded => {
-                    let url = self.url.clone();
-                    self.finish_load(url, emit);
-                }
-                C::Dialog { dialog_type, message, default_prompt } => {
-                    let id = self.next_id;
-                    self.next_id += 1;
-                    let kind = match dialog_type.as_str() {
-                        "confirm" => webkit::delegate::ScriptDialogKind::Confirm,
-                        "prompt" => webkit::delegate::ScriptDialogKind::Prompt,
-                        "beforeunload" => webkit::delegate::ScriptDialogKind::BeforeUnloadConfirm,
-                        _ => webkit::delegate::ScriptDialogKind::Alert,
-                    };
-                    // CDP answers the live dialog directly; the engine id
-                    // only correlates the delegate round-trip in the UI.
-                    emit.emit(&EngineEvent::ScriptDialog {
-                        id,
-                        kind,
-                        message,
-                        prompt_default: if default_prompt.is_empty() {
-                            None
-                        } else {
-                            Some(default_prompt)
-                        },
-                    });
-                }
-                C::DownloadBegin { guid, url, filename } => {
-                    let id = self.next_id;
-                    self.next_id += 1;
-                    self.downloads.insert(id, (guid.clone(), None));
-                    self.guids.insert(guid, id);
-                    emit.emit(&EngineEvent::DownloadStarted {
-                        id,
-                        uri: Some(url),
-                        suggested_filename: filename,
-                    });
-                }
-                C::DownloadProgress { guid, received, state } => {
-                    let Some(id) = self.guids.get(&guid).copied() else {
-                        continue;
-                    };
-                    match state.as_str() {
-                        "completed" => self.finish_download(id, emit),
-                        "canceled" => {
-                            self.downloads.remove(&id);
-                            self.guids.remove(&guid);
-                            emit.emit(&EngineEvent::DownloadFailed {
-                                id,
-                                error: "canceled".into(),
-                            });
-                        }
-                        _ => emit.emit(&EngineEvent::DownloadProgress {
-                            id,
-                            progress: 0.0,
-                            received_bytes: received,
-                        }),
-                    }
-                }
+            let mut out = Vec::new();
+            webkit::gecko::handle_bidi_event(&self.page, &event, &mut self.state, &mut out);
+            for event in &out {
+                emit.emit(event);
             }
         }
     }
 
     fn ping(&mut self, emit: &mut Emitter) {
-        self.capture(emit);
+        // A real window is already on screen; report readiness so the
+        // helper self test can exit.
+        emit.emit(&EngineEvent::EngineWindow {
+            pid: self.page.pid(),
+            kiosk: self.state.kiosk,
+        });
         emit.emit(&EngineEvent::ReadyToShow);
     }
 }
@@ -549,29 +332,35 @@ fn parse_flag(prefix: &str) -> Option<String> {
     })
 }
 
+fn has_flag(name: &str) -> bool {
+    std::env::args().any(|arg| arg == name)
+}
+
 fn build_renderer(
     choice: &str,
     slot_dir: &std::path::Path,
+    headless: bool,
+    private: bool,
     emit: &mut Emitter,
 ) -> Box<dyn Renderer> {
-    #[cfg(feature = "chromium")]
-    if choice == "chromium" || choice == "auto" {
+    #[cfg(feature = "gecko")]
+    if choice == "gecko" || choice == "auto" {
         let download_dir = slot_dir.join("downloads");
         let _ = std::fs::create_dir_all(&download_dir);
-        match ChromiumRenderer::launch(download_dir) {
+        match GeckoRenderer::launch(download_dir, headless, private, emit) {
             Ok(renderer) => {
-                eprintln!("tontoo-webengine: chromium renderer");
+                eprintln!("tontoo-webengine: gecko renderer");
                 return Box::new(renderer);
             }
             Err(e) => {
-                if choice == "chromium" {
+                if choice == "gecko" {
                     emit.emit(&EngineEvent::LoadFailed {
                         url: None,
-                        error: format!("chromium unavailable: {e}"),
+                        error: format!("firefox unavailable: {e}"),
                     });
                     std::process::exit(1);
                 }
-                eprintln!("tontoo-webengine: chromium unavailable ({e}); mock renderer");
+                eprintln!("tontoo-webengine: firefox unavailable ({e}); mock renderer");
             }
         }
     }
@@ -588,6 +377,8 @@ fn main() {
         .find(|w| w[0] == "--slot-dir")
         .map(|w| std::path::PathBuf::from(&w[1]));
     let ping = args.iter().any(|a| a == "--ping");
+    let headless = has_flag("--headless");
+    let private = has_flag("--private");
     // --renderer flag wins, then TONTOO_WEBENGINE_RENDERER, then auto.
     let choice = parse_flag("--renderer=").or_else(|| {
         std::env::var("TONTOO_WEBENGINE_RENDERER")
@@ -595,7 +386,7 @@ fn main() {
             .filter(|v| !v.trim().is_empty())
     }).unwrap_or_else(|| "auto".into());
     let Some(slot_dir) = slot_dir else {
-        eprintln!("usage: tontoo-webengine --slot-dir <dir> [--ping] [--renderer=mock|chromium|auto]");
+        eprintln!("usage: tontoo-webengine --slot-dir <dir> [--ping] [--headless] [--private] [--renderer=mock|gecko|auto]");
         std::process::exit(2);
     };
     let _ = std::fs::create_dir_all(&slot_dir);
@@ -605,13 +396,13 @@ fn main() {
         slot_dir: slot_dir.clone(),
         seq: 0,
     };
-    #[cfg(feature = "chromium")]
-    if choice == "auto" || choice == "chromium" {
+    #[cfg(feature = "gecko")]
+    if choice == "auto" || choice == "gecko" {
         // Refresh the managed build at most once a day, in the
         // background; the current build keeps serving meanwhile.
-        webkit::chrome_provision::maybe_background_update();
+        webkit::gecko_provision::maybe_background_update();
     }
-    let mut renderer = build_renderer(&choice, &slot_dir, &mut emit);
+    let mut renderer = build_renderer(&choice, &slot_dir, headless, private, &mut emit);
 
     if ping {
         renderer.ping(&mut emit);

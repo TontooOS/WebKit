@@ -1,6 +1,6 @@
 {
     "app.name": "Browser",
-    "app.description": "TontooOS-Webbrowser mit TontooWebKit",
+    "app.description": "TontooOS-Webbrowser mit TontooWebKit und Gecko",
     "webkit.error": "Beim Laden der Seite ist ein Fehler aufgetreten.",
     "webkit.error.invalid_url": "Diese URL ist nicht gueltig.",
     "webkit.loading": "Wird geladen",
@@ -13,5 +13,16 @@
     "browser.address": "Adresse",
     "browser.open": "Oeffnen",
     "browser.load_failed": "Die Seite konnte nicht geladen werden.",
-    "browser.no_internet": "Keine Internetverbindung."
+    "browser.no_internet": "Keine Internetverbindung.",
+    "browser.tab.new": "Neuer Tab",
+    "browser.tab.close": "Tab schliessen",
+    "browser.engine.starting": "Firefox wird gestartet...",
+    "browser.engine.unavailable": "Engine nicht verfuegbar",
+    "browser.engine.window": "Firefox-Fenster",
+    "browser.extension.install": "Erweiterung installieren",
+    "browser.extension.installed": "Erweiterung installiert",
+    "browser.extension.failed": "Die Erweiterung konnte nicht installiert werden.",
+    "browser.extension.none": "Keine Erweiterungen installiert.",
+    "browser.download.finished": "Download abgeschlossen.",
+    "browser.download.failed": "Der Download ist fehlgeschlagen."
 }

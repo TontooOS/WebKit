@@ -53,6 +53,10 @@ pub struct WebView {
     next_js_id: Cell<u64>,
     pending_js: RefCell<HashMap<u64, SyncSender<JsonValue>>>,
     pending_cookies: RefCell<HashMap<u64, SyncSender<Vec<Cookie>>>>,
+    pending_extension: RefCell<HashMap<u64, SyncSender<Result<String, String>>>>,
+    pending_extensions: RefCell<HashMap<u64, SyncSender<Vec<String>>>>,
+    engine_window: RefCell<Option<(u32, bool)>>,
+    contexts: RefCell<Vec<String>>,
 }
 
 impl WebView {
@@ -89,6 +93,10 @@ impl WebView {
             next_js_id: Cell::new(1),
             pending_js: RefCell::new(HashMap::new()),
             pending_cookies: RefCell::new(HashMap::new()),
+            pending_extension: RefCell::new(HashMap::new()),
+            pending_extensions: RefCell::new(HashMap::new()),
+            engine_window: RefCell::new(None),
+            contexts: RefCell::new(Vec::new()),
         };
         if let Some(url) = view.config.start_url.clone() {
             view.load_url(&url)?;
@@ -442,6 +450,43 @@ impl WebView {
                 *self.can_back.borrow_mut() = can_back;
                 *self.can_forward.borrow_mut() = can_forward;
             }
+            E::EngineWindow { pid, kiosk } => {
+                *self.engine_window.borrow_mut() = Some((pid, kiosk));
+            }
+            E::ContextReady { context } => {
+                let mut contexts = self.contexts.borrow_mut();
+                if !contexts.contains(&context) {
+                    contexts.push(context);
+                }
+            }
+            E::ContextClosed { context } => {
+                self.contexts.borrow_mut().retain(|c| *c != context);
+            }
+            E::ExtensionInstalled { id, extension } => {
+                if id == 0 {
+                    self.delegate
+                        .borrow_mut()
+                        .extension_installed(&extension);
+                    return;
+                }
+                if let Some(tx) = self.pending_extension.borrow_mut().remove(&id) {
+                    let _ = tx.try_send(Ok(extension));
+                }
+            }
+            E::ExtensionFailed { id, error } => {
+                if let Some(tx) = self.pending_extension.borrow_mut().remove(&id) {
+                    let _ = tx.try_send(Err(error));
+                    return;
+                }
+                if let Some(tx) = self.pending_extensions.borrow_mut().remove(&id) {
+                    let _ = tx.try_send(Vec::new());
+                }
+            }
+            E::Extensions { id, extensions } => {
+                if let Some(tx) = self.pending_extensions.borrow_mut().remove(&id) {
+                    let _ = tx.try_send(extensions);
+                }
+            }
         }
     }
 
@@ -542,6 +587,120 @@ impl WebView {
     /// Clear stored website data in the engine.
     pub fn clear_data(&self, cookies: bool, cache: bool) {
         self.engine.send(EngineCommand::ClearData { cookies, cache });
+    }
+
+    /// Install a WebExtension from a local `manifest.json` directory or an
+    /// `.xpi` archive and return its Firefox extension id.
+    ///
+    /// Blocks up to [`JS_TIMEOUT`] while pumping engine events. The
+    /// extension is installed into the engine profile, so it survives
+    /// restarts and updates itself from AMO. Unsigned packages need an ESR
+    /// or DevEdition build: official release builds enforce Mozilla
+    /// signatures regardless of the profile prefs.
+    pub fn install_extension(&self, path: &std::path::Path) -> Result<String, WebKitError> {
+        let id = self.next_js_id.get();
+        self.next_js_id.set(id.wrapping_add(1).max(1));
+        let (tx, rx) = sync_channel::<Result<String, String>>(1);
+        self.pending_extension.borrow_mut().insert(id, tx);
+        self.engine.send(EngineCommand::InstallExtension {
+            id,
+            path: path.to_string_lossy().to_string(),
+        });
+        let deadline = Instant::now() + JS_TIMEOUT;
+        loop {
+            self.pump_events();
+            match rx.try_recv() {
+                Ok(result) => {
+                    return result.map_err(WebKitError::Engine);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.pending_extension.borrow_mut().remove(&id);
+                    return Err(WebKitError::Engine("engine hung up".into()));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= deadline {
+                self.pending_extension.borrow_mut().remove(&id);
+                return Err(WebKitError::Engine(
+                    "timed out waiting for the extension".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// List the installed WebExtensions. Blocks up to [`JS_TIMEOUT`].
+    ///
+    /// Returns an empty vec when the engine cannot answer (mock engine).
+    pub fn list_extensions(&self) -> Result<Vec<String>, WebKitError> {
+        let id = self.next_js_id.get();
+        self.next_js_id.set(id.wrapping_add(1).max(1));
+        let (tx, rx) = sync_channel::<Vec<String>>(1);
+        self.pending_extensions.borrow_mut().insert(id, tx);
+        self.engine.send(EngineCommand::ListExtensions { id });
+        let deadline = Instant::now() + JS_TIMEOUT;
+        loop {
+            self.pump_events();
+            match rx.try_recv() {
+                Ok(extensions) => return Ok(extensions),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.pending_extensions.borrow_mut().remove(&id);
+                    return Err(WebKitError::Engine("engine hung up".into()));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= deadline {
+                self.pending_extensions.borrow_mut().remove(&id);
+                return Err(WebKitError::Engine(
+                    "timed out waiting for the extension list".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Open a new top-level context (`"tab"` or `"window"`).
+    pub fn new_tab(&self, kind: &str) {
+        let id = self.next_js_id.get();
+        self.next_js_id.set(id.wrapping_add(1).max(1));
+        self.engine.send(EngineCommand::NewTab {
+            id,
+            kind: kind.to_string(),
+        });
+    }
+
+    /// Close a top-level context.
+    pub fn close_tab(&self, context: &str) {
+        let id = self.next_js_id.get();
+        self.next_js_id.set(id.wrapping_add(1).max(1));
+        self.engine.send(EngineCommand::CloseTab {
+            id,
+            context: context.to_string(),
+        });
+    }
+
+    /// Focus a top-level context so its window comes forward.
+    pub fn activate_tab(&self, context: &str) {
+        let id = self.next_js_id.get();
+        self.next_js_id.set(id.wrapping_add(1).max(1));
+        self.engine.send(EngineCommand::ActivateTab {
+            id,
+            context: context.to_string(),
+        });
+    }
+
+    /// Known top-level contexts (tabs and windows) the engine reported.
+    pub fn contexts(&self) -> Vec<String> {
+        self.contexts.borrow().clone()
+    }
+
+    /// The engine's own desktop window as `(pid, kiosk)`, once reported.
+    ///
+    /// Gecko draws into a real Wayland window instead of handing out
+    /// frames. Look the pid up with `CoreWindows::list_windows` to
+    /// position, minimize or close that window from a host app.
+    pub fn engine_window(&self) -> Option<(u32, bool)> {
+        *self.engine_window.borrow()
     }
 
     /// The configured settings (serializable; forwarded to the engine

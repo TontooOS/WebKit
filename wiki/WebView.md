@@ -109,6 +109,29 @@ let title = web_view.evaluate_javascript("document.title").unwrap();
 `clear_data()` talk to the engine cookie store. See
 [Cookies.md](Cookies.md).
 
+## Extensions and Tabs
+
+| Method | Behavior |
+|---|---|
+| `install_extension(&self, path: &Path) -> Result<String, WebKitError>` | Installs a `manifest.json` folder or `.xpi`, returns the Firefox extension id |
+| `list_extensions(&self) -> Result<Vec<String>, WebKitError>` | Installed extension ids |
+| `new_tab(&self, kind: &str)` | Opens a `"tab"` or `"window"` |
+| `close_tab(&self, context: &str)` | Closes a top-level context |
+| `activate_tab(&self, context: &str)` | Focuses a context |
+| `contexts(&self) -> Vec<String>` | Top-level contexts the engine reported |
+| `engine_window(&self) -> Option<(u32, bool)>` | The engine's own window as `(pid, kiosk)` |
+
+`install_extension` and `list_extensions` block while pumping engine
+events, up to `JS_TIMEOUT`. See [Extensions.md](Extensions.md).
+
+## Engine Window
+
+Gecko draws into its own Wayland window and never produces a
+`SharedFrame`, so `poll_frame()` returns `None` on a Gecko-backed view.
+`engine_window()` reports the Firefox process id instead; look it up in
+`CoreWindows::list_windows` to position or close it. See
+[Gecko.md](Gecko.md).
+
 ## Cross References
 
 - [Configuration.md](Configuration.md) -- start URL and data store
@@ -116,3 +139,5 @@ let title = web_view.evaluate_javascript("document.title").unwrap();
 - [Navigation.md](Navigation.md) -- navigation and view delegates
 - [JavaScript.md](JavaScript.md) -- evaluation details and value mapping
 - [Geolocation.md](Geolocation.md) -- page geolocation via CoreLocation
+- [Extensions.md](Extensions.md) -- WebExtensions on Gecko
+- [Gecko.md](Gecko.md) -- the Firefox backend

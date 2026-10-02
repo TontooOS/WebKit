@@ -1,7 +1,7 @@
 # JavaScript
 
 TontooWebKit exposes JavaScript execution and result mapping on top of the
-engine (Chromium CDP `Runtime.evaluate`).
+engine (Gecko: WebDriver BiDi `script.evaluate`).
 
 ## Evaluating Scripts
 
@@ -26,8 +26,8 @@ assert_eq!(result, foundation::serialization::JsonValue::Integer(2));
 
 ## Value Mapping
 
-The engine returns a CDP Runtime `RemoteObject`; the framework maps it to
-JSON (`chromium::remote_to_json`):
+The engine returns a BiDi remote object (`{ type, value }`); the
+framework maps it to JSON (`gecko::remote_to_json`):
 
 | JS value | JSON |
 |---|---|
@@ -50,3 +50,4 @@ payload goes through the same value mapping. See
 
 - [ScriptMessages.md](ScriptMessages.md) -- page-to-Rust message bridge
 - [WebView.md](WebView.md) -- the widget exposing evaluation
+- [Gecko.md](Gecko.md) -- the `script.evaluate` call and its options
