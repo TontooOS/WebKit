@@ -8,33 +8,51 @@
 //!
 //! ## Backends
 //!
-//! * Default (`vello` feature): backend-neutral [`view::WebView`] driving a
-//!   [`engine::WebEngine`]. The `tontoo-webengine` helper runs headful
-//!   Firefox and speaks WebDriver BiDi to it
-//!   ([`gecko::GeckoPage`]), so pages render in their own Wayland window
-//!   with WebExtensions enabled; [`engine::MockEngine`] stands in on hosts
-//!   without Firefox.
+//! * Default (`wpe` feature): real WebKit through WPE. [`wpe::WpeEngine`]
+//!   renders the page offscreen with the FDO backend and a surfaceless EGL
+//!   display, then hands back BGRA frames that
+//!   [`tontooui_view::WebViewContent`] blits as a Vello texture. The page
+//!   therefore lives *inside* the TontooUI window: one window, no compositor
+//!   involvement, no engine window.
 //! * Engines that produce pixel buffers publish them as
 //!   [`engine::SharedFrame`], which
 //!   [`tontooui_view::WebViewContent`] blits as a Vello texture, so rounded
 //!   corners and LiquidGlass keep working in TontooUI windows.
+//! * Optional (`gecko` feature): headful Firefox over WebDriver BiDi
+//!   ([`gecko::GeckoPage`]). Firefox brings WebExtensions but also brings its
+//!   own window, so it can only drive a separate browser window.
+//! * [`engine::MockEngine`] stands in on hosts without any engine and backs
+//!   the placeholder frames.
 //!
-//! ## Quick Start (Gecko)
+//! ## Quick Start (WPE, one TontooUI window)
 //!
 //! ```rust,no_run
-//! use webkit::{GeckoOptions, WebEngine, WebView, WebKitConfiguration};
+//! use webkit::{WebKitConfiguration, WebViewContent};
 //!
 //! fn main() {
-//!     let engine = webkit::GeckoEngine::launch(GeckoOptions::default())
-//!         .expect("failed to launch Firefox");
+//!     let web = WebViewContent::with_wpe(
+//!         WebKitConfiguration::new().start_url("https://tontoo-os.github.io"),
+//!     ).expect("failed to start WPE WebKit");
 //!
-//!     let view = WebView::with_engine(
-//!     WebKitConfiguration::new().start_url("https://tontoo-os.github.io"),
-//!     std::sync::Arc::new(webkit::GeckoEngine::launch(
-//!         webkit::GeckoOptions::default(),
-//!     ).expect("failed to launch Firefox")),
-//! ).expect("failed to create web view");
-//! view.load_url("https://tontoo-os.github.io").unwrap();
+//!     // `web` is a TontooUI view: place it in any view tree and it
+//!     // uploads the newest frame as a texture.
+//! }
+//! ```
+//!
+//! ## Quick Start (engine handle)
+//!
+//! ```rust,no_run
+//! use webkit::{WebKitConfiguration, WebView};
+//!
+//! fn main() {
+//!     let engine = webkit::WpeEngine::launch(webkit::WpeOptions::default())
+//!         .expect("failed to start WPE WebKit");
+//!
+//!     let web_view = WebView::with_engine(
+//!         WebKitConfiguration::new().start_url("https://tontoo-os.github.io"),
+//!         std::sync::Arc::new(engine),
+//!     ).expect("failed to create web view");
+//!     web_view.load_url("https://tontoo-os.github.io").unwrap();
 //! }
 //! ```
 //!
@@ -94,6 +112,8 @@ pub mod transport;
 pub use transport::{ProcessEngine, find_helper};
 #[cfg(feature = "vello")]
 pub mod view;
+#[cfg(feature = "wpe")]
+pub mod wpe;
 
 pub use config::{DataStoreKind, WebKitConfiguration};
 pub use cookie::{Cookie, CookieAcceptPolicy, CookieStorage};
@@ -120,6 +140,8 @@ pub use settings::{AutoPlay, CacheModel, WebSettings, WebSettingsBuilder};
 pub use tontooui_view::WebViewContent;
 #[cfg(feature = "vello")]
 pub use view::{WebView, WebViewBuilder};
+#[cfg(feature = "wpe")]
+pub use wpe::{WpeEngine, WpeOptions};
 
 /// Version of the TontooWebKit framework (major, minor, patch).
 pub const WEBKIT_VERSION: (u32, u32, u32) = (26, 1, 0);

@@ -9,8 +9,10 @@ delegates) stays stable while the engine behind it is exchangeable.
 ```
 WebView (src/view.rs, no toolkit dependency)
   |-- WebEngine trait (src/engine.rs)
+  |     |-- WpeEngine ........ real WebKit offscreen through libwpe + FDO
+  |     |     (in-process: one worker thread, no helper needed)
   |     |-- GeckoEngine ..... headful Firefox over WebDriver BiDi
-  |     |     (in-process: two worker threads, no helper needed)
+  |     |     (in-process: two worker threads, optional feature)
   |     |-- ProcessEngine ... spawns tontoo-webengine (src/transport.rs)
   |     |     |-- GeckoRenderer  .. same GeckoPage, line protocol
   |     |     +-- MockRenderer   .. animated placeholder + mock cookies
@@ -19,11 +21,11 @@ WebView (src/view.rs, no toolkit dependency)
   +-- EngineCommand / EngineEvent (JSON IPC vocabulary, manual encoding)
 ```
 
-Two ways to reach Gecko:
+Two ways to reach WPE:
 
 | Entry point | Use it when | Cost |
 |---|---|---|
-| [`gecko::GeckoEngine`] | Browser apps; talk to Firefox directly | No helper binary, no line protocol |
+| [`wpe::WpeEngine`] | The page belongs inside a TontooUI window | One worker thread, frames blit as a texture |
 | [`transport::ProcessEngine`] | The engine must be isolated, or reached through the C ABI | One extra process, line protocol |
 
 > **Note:** Gecko draws into its **own Wayland window**, so it never
@@ -31,8 +33,8 @@ Two ways to reach Gecko:
 > the engine protocol reports `EngineEvent::EngineWindow { pid, kiosk }`
 > instead. A host app looks that window up through
 > `CoreWindows::list_windows` (match on `pid`) to position, minimize or
-> close it. Frame-producing engines (a future WPE WebKit helper, CEF OSR)
-> keep the `SharedFrame` path and the TontooUI texture blit.
+> close it. Frame-producing engines (WPE WebKit, CEF OSR) keep the
+> `SharedFrame` path and the TontooUI texture blit.
 
 The view owns no widget. It sends [`EngineCommand`] values to the engine
 and reads the latest [`SharedFrame`] with `poll_frame` when the engine has
@@ -46,8 +48,9 @@ which every UI calls once per frame.
 
 | Feature | Default | Description |
 |---|---|---|
+| `wpe` | yes | Real WebKit offscreen through libwpe + the FDO backend |
 | `vello` | yes | Backend-neutral `WebView`, `WebViewContent` for TontooUI |
-| `gecko` | yes | Headful Firefox over WebDriver BiDi (pages, extensions) |
+| `gecko` | no | Headful Firefox over WebDriver BiDi (WebExtensions) |
 
 `WebView` is the engine view in all configurations.
 
@@ -72,8 +75,26 @@ pub trait WebEngine: Send + Sync {
 - `load_url` validates the scheme (`http`, `https`, `file`, `data`,
   `about`) and returns `Err(WebKitError::InvalidUrl)` otherwise.
 - `eval_sync` answers inline when the engine lives in this process
-  (`GeckoEngine`, `MockEngine`); out-of-process engines return `None` and
-  the view correlates the async `JsResult` event instead.
+  (`MockEngine`); engines with their own main loop (`WpeEngine`,
+  `GeckoEngine`) or a separate process return `None` and the view correlates
+  the async `JsResult` event instead.
+
+### `WpeEngine`
+
+```rust
+pub struct WpeEngine { /* ... */ }
+pub struct WpeOptions { pub width: u32, pub height: u32, pub start_url: Option<String>,
+                        pub private: bool, pub download_dir: PathBuf }
+WpeEngine::launch(options: WpeOptions) -> Result<Self, String>
+```
+
+- One worker thread creates the offscreen WebKit view, pumps the GLib main
+  loop in 8 ms slices, drains the shim's event ring and copies the newest
+  frame. See [WPE.md](WPE.md).
+- The page lands in the same window as the toolbar: the frames are
+  `SharedFrame`s, so `WebViewContent` blits them like any other texture.
+- Needs `wpewebkit`, `libwpe`, `wpebackend-fdo` and EGL; `launch` returns the
+  loader error otherwise.
 
 ### `SharedFrame`
 
@@ -173,11 +194,18 @@ The helper (`src/bin/tontoo-webengine.rs`) is a plain child process:
 - Headless self test: `tontoo-webengine --slot-dir <dir> --ping --renderer=mock`
   prints `FrameReady` and writes exactly `800 * 600 * 4` bytes.
 
-## Gecko Renderer (Production)
+## WPE Renderer (Production)
+
+The default engine renders real WebKit offscreen: libwpe's FDO backend on a
+surfaceless EGL display, frames copied out of the exported `wl_shm_buffer`
+into `SharedFrame`s. Full details in [WPE.md](WPE.md).
+
+## Gecko Renderer (Optional)
 
 The Gecko driver in [`Gecko.md`](Gecko.md) drives a headful Firefox over
-WebDriver BiDi. Page JavaScript, WebGL, video, printing and
-WebExtensions all run inside Gecko; host processes only ever see JSON.
+WebDriver BiDi behind the `gecko` feature. Page JavaScript, WebGL, video,
+printing and WebExtensions all run inside Gecko; host processes only ever see
+JSON, and Firefox owns its own window.
 
 ## Firefox Auto-Update (`gecko_provision.rs`)
 
@@ -185,15 +213,19 @@ The helper provisions and updates its own Firefox ESR build, so
 TontooOS installations run a patched Gecko even without a distro package
 (see [Gecko.md](Gecko.md) for the full layout and env table).
 
-End-to-end proof (helper binary plus a Firefox binary required):
+End-to-end proof:
 
 ```bash
+cargo test --test wpe_osr     # offscreen WPE WebKit paints a real frame
 TONTOO_WEBENGINE_BIN=tontoo-webengine TONTOO_WEBENGINE_RENDERER=mock cargo test --test process
-cargo test --test gecko_bidi -- --ignored --nocapture
+cargo test --test gecko_bidi --features gecko -- --ignored --nocapture
 ```
 
-The first test round-trips the line protocol against the mock renderer.
-The second launches a headless private Firefox, asserts `1 + 1 == 2` and
+The first test loads a page with a green background, waits for
+`EngineEvent::LoadFinished` plus a painted frame and asserts the 640x480
+BGRA buffer; it needs the engine packages but no display server.
+The second round-trips the line protocol against the mock renderer.
+The third launches a headless private Firefox, asserts `1 + 1 == 2` and
 `document.title == "Hello"` through the full stack, round-trips the
 cookie jar and lists the installed extensions. It is `#[ignore]`d
 because a real browser session takes minutes to set up on a
@@ -204,16 +236,16 @@ budget.
 
 ```rust,no_run
 use std::sync::Arc;
-use webkit::{GeckoEngine, GeckoOptions, MockEngine, WebKitConfiguration, WebView};
+use webkit::{MockEngine, WebKitConfiguration, WebView, WpeEngine, WpeOptions};
 
-// Real browser: Firefox owns the window, TontooUI draws the toolbar.
-let engine = GeckoEngine::launch(GeckoOptions::default()).expect("Firefox");
+// Production: real WebKit drawn inside the TontooUI window.
+let engine = WpeEngine::launch(WpeOptions::default()).expect("WPE");
 let view = WebView::builder()
   .start_url("https://example.com")
   .build_on(Arc::new(engine))
   .expect("invalid start URL");
 
-// Offline host: the test engine.
+// Host without the engine packages: the test engine.
 let engine = Arc::new(MockEngine::new(800, 600));
 let view = WebView::builder()
   .start_url("https://example.com")
@@ -227,13 +259,15 @@ assert_eq!(frame.rgba.len(), 800 * 600 * 4);
 Run the demos:
 
 ```bash
-cargo run --example tontoo_browser   # TontooUI toolbar + headful Firefox
+cargo run --example tontoo_browser   # TontooUI window with WPE WebKit inside
 cargo run --example vello_webview    # mock frames in a TontooUI window
 cargo run --example vello_browser    # mock frames with a browser toolbar
+cargo run --example gecko_browser --features gecko   # toolbar + headful Firefox
 ```
 
 ## Cross References
 
+- [WPE.md](WPE.md) -- the offscreen WPE WebKit engine, build deps, shim API
 - [Gecko.md](Gecko.md) -- the Firefox driver, profile prefs, BiDi mapping
 - [Extensions.md](Extensions.md) -- WebExtensions install, list, profiles
 - [WebView.md](WebView.md) -- the backend-neutral view widget and its methods

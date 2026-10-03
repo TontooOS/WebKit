@@ -56,6 +56,34 @@ impl WebViewContent {
         })
     }
 
+    /// Create the wrapper on an explicit engine, e.g. the in-process
+    /// [`crate::wpe::WpeEngine`].
+    pub fn with_engine(
+        config: WebKitConfiguration,
+        engine: std::sync::Arc<dyn crate::engine::WebEngine>,
+    ) -> Result<Self, WebKitError> {
+        Ok(Self {
+            inner: WebView::with_engine(config, engine)?,
+            x: 0.0,
+            y: 0.0,
+            placed_w: 0.0,
+            placed_h: 0.0,
+            scale: 1.0,
+        })
+    }
+
+    /// Create the wrapper on the in-process WPE WebKit engine.
+    ///
+    /// The engine renders offscreen, so the page is drawn inside this window
+    /// like any other TontooUI view. Returns the engine error when the WPE
+    /// libraries are missing.
+    #[cfg(feature = "wpe")]
+    pub fn with_wpe(config: WebKitConfiguration) -> Result<Self, WebKitError> {
+        let engine = crate::wpe::WpeEngine::launch(crate::wpe::WpeOptions::default())
+            .map_err(WebKitError::Engine)?;
+        Self::with_engine(config, std::sync::Arc::new(engine))
+    }
+
     /// Create the wrapper on the spawned helper when available,
     /// otherwise on the test engine. Never fails.
     pub fn with_spawned_fallback() -> Self {

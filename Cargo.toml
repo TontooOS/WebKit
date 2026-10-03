@@ -8,6 +8,9 @@ readme = "README.md"
 keywords = ["tontoo", "webkit", "web", "browser", "ui", "gecko", "firefox"]
 categories = ["gui", "api-bindings"]
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 foundation = { path = "../Foundation" }
 corelocation = { path = "../CoreLocation" }
@@ -16,19 +19,22 @@ corelocation = { path = "../CoreLocation" }
 tontooui = { path = "../TontooUI", optional = true }
 vello = { version = "0.10", optional = true }
 
-# Gecko path: headful Firefox driven over WebDriver BiDi. Pure Rust
-# (tungstenite websocket), needs a Firefox binary at RUNTIME only -- the
-# browser renders and runs page JS itself, including WebExtensions. The
-# helper can provision and auto-update a Firefox ESR build itself
-# (ureq + xz/tar, Linux) when the host has no Firefox.
+# WPE WebKit path (default): offscreen rendering into a TontooUI window.
+# Needs wpewebkit, libwpe, wpebackend-fdo and EGL at build and run time; the
+# C shim in src/wpe does the WebKit and EGL calls.
+#
+# Gecko path (optional): headful Firefox over WebDriver BiDi. Firefox brings
+# WebExtensions and its own window, so it is a second engine, not the
+# default: it cannot be embedded into a TontooUI window.
 tungstenite = { version = "0.26", optional = true }
 ureq = { version = "3", optional = true }
 lzma-rs = { version = "0.3", optional = true }
 tar = { version = "0.4", optional = true }
 
 [features]
-default = ["vello", "gecko"]
+default = ["vello", "wpe"]
 vello = ["dep:tontooui", "dep:vello"]
+wpe = []
 gecko = ["dep:tungstenite", "dep:ureq", "dep:lzma-rs", "dep:tar"]
 
 [lib]
@@ -51,4 +57,9 @@ required-features = ["vello"]
 [[example]]
 name = "tontoo_browser"
 path = "examples/tontoo_browser.rs"
+required-features = ["vello", "wpe"]
+
+[[example]]
+name = "gecko_browser"
+path = "examples/gecko_browser.rs"
 required-features = ["vello", "gecko"]

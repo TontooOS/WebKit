@@ -1,10 +1,13 @@
 # Extensions
 
-WebExtensions on TontooOS. Because the Gecko backend drives a real
-Firefox with a real profile, every Firefox add-on works: uBlock Origin,
-Bitwarden, Vimium, Dark Reader, Return YouTube Dislike and the rest of
-AMO. Nothing in TontooWebKit re-implements the extension system -- it
-only asks Firefox to install them.
+WebExtensions on TontooOS, **with the optional `gecko` engine only**. Because
+the Gecko backend drives a real Firefox with a real profile, every Firefox
+add-on works: uBlock Origin, Bitwarden, Vimium, Dark Reader, Return YouTube
+Dislike and the rest of AMO. Nothing in TontooWebKit re-implements the
+extension system -- it only asks Firefox to install them.
+
+The default WPE engine has no add-on manager, so `install_extension` and
+`list_extensions` report an error there. See [WPE.md](WPE.md).
 
 ## Two Paths
 

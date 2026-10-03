@@ -1,9 +1,13 @@
 # Gecko
 
-The Gecko backend: a headful Firefox driven over WebDriver BiDi. This is
-the engine that can host a full TontooOS browser, because Firefox brings
-its own Wayland window, full-frame-rate rendering, WebGL, video and
-WebExtensions.
+The optional Gecko backend: a headful Firefox driven over WebDriver BiDi,
+behind the `gecko` cargo feature. It is the engine that can host WebExtensions,
+because Firefox brings its own Wayland window, full-frame-rate rendering,
+WebGL, video and WebExtensions.
+
+Firefox owns that window, so the page cannot be drawn inside a TontooUI
+window: the browser chrome is a separate, draggable toolbar window. For the
+single-window browser use the default WPE engine (see [WPE.md](WPE.md)).
 
 ## Lifecycle
 

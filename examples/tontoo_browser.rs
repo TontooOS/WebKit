@@ -1,39 +1,27 @@
-//! TontooOS browser: a TontooUI toolbar window on top of headful Firefox.
+//! TontooOS browser: one TontooUI window with WPE WebKit inside.
 //!
-//! The toolbar is a normal TontooUI window (traffic lights, address field,
-//! back/forward/reload/new tab, progress and a status line). Firefox runs
-//! as its own Wayland window with `--kiosk`-style chrome hidden and is
-//! driven over WebDriver BiDi by [`webkit::GeckoEngine`], so pages render at
-//! full frame rate with WebExtensions enabled.
+//! The toolbar (traffic lights, address field, back/forward/reload, progress
+//! and a status line) is normal TontooUI. The page itself is rendered by
+//! [`webkit::WpeEngine`]: WPE WebKit draws offscreen through the FDO backend
+//! and hands back BGRA frames that blit into this window as a texture, so
+//! there is exactly one window and no compositor involvement.
 //!
 //! Run with: `cargo run --example tontoo_browser`
 //!
-//! Try: drag the toolbar to the top edge, click the address field, type
-//! `example.com` + Enter, then click into the page (the toolbar only takes
-//! keyboard focus while it is focused, otherwise keys go to Firefox).
+//! Try: type `example.com` + Enter, click Back/Reload, watch progress, then
+//! click into the page and scroll. The toolbar only takes keyboard focus
+//! while the address field is selected, otherwise keys go to the page.
 //!
 //! Env:
 //!
 //! | Variable | Meaning |
 //! |---|---|
-//! | `TONTOO_FIREFOX_BIN` | Firefox binary override |
-//! | `TONTOO_FIREFOX_CHANNEL` | `esr` (default) or `release` for provisioning |
 //! | `TONTOO_BROWSER_HOME` | Start URL (default `https://example.com`) |
-//! | `TONTOO_BROWSER_EXTENSIONS` | Comma separated AMO add-on ids to install |
-//! | `TONTOO_BROWSER_PRIVATE` | `1` starts an ephemeral private profile |
-//! | `TONTOO_BROWSER_HEADLESS` | `1` runs Firefox without a window (CI) |
-//! | `TONTOO_BROWSER_SIZE` | Firefox window size, e.g. `1200x800` |
-//! | `TONTOO_BROWSER_KIOSK` | `1` asks Firefox for chrome-less fullscreen |
-//!
-//! `TONTOO_BROWSER_KIOSK` is off by default on purpose: `--kiosk` sends an
-//! `xdg_toplevel.fullscreen` request, and a compositor that answers it
-//! with a 0 x 0 size aborts Firefox with `xdg_surface buffer (1 x 1) is
-//! larger than the configured fullscreen state (0 x 0)`. Enable it once
-//! the compositor handles fullscreen.
+//! | `TONTOO_BROWSER_PRIVATE` | `1` starts with an ephemeral data store |
+//! | `TONTOO_BROWSER_MOCK` | `1` uses the placeholder engine instead of WPE |
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use tontooui::elements::{
     BasicText, BasicTextField, Button, LinearProgress, Titlebar, TrafficAction, View,
@@ -44,12 +32,15 @@ use tontooui::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, 
 use tontooui::theme::{ThemeMode, ThemeWatcher};
 use vello::Scene;
 use vello::peniko::Color;
-use webkit::{ExtensionPolicy, GeckoEngine, GeckoOptions, WebKitConfiguration, WebView};
+use webkit::{WebKitConfiguration, WebViewContent};
 
-/// Toolbar window size in logical px. The compositor places windows, so
-/// the toolbar is draggable (drag the titlebar) to sit above the page.
-const TOOLBAR_WIDTH: u32 = 1000;
-const TOOLBAR_HEIGHT: u32 = 92;
+#[derive(Clone, Copy)]
+enum NavCmd {
+    Back,
+    Forward,
+    Reload,
+    Go,
+}
 
 fn env_flag(name: &str) -> bool {
     matches!(std::env::var(name).as_deref(), Ok("1") | Ok("true"))
@@ -59,177 +50,97 @@ fn start_url() -> String {
     std::env::var("TONTOO_BROWSER_HOME").unwrap_or_else(|_| "https://example.com".into())
 }
 
-fn download_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let base = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
-    std::path::PathBuf::from(base)
-        .join("tontoo-webengine")
-        .join("downloads")
-}
-
-/// Window size from `TONTOO_BROWSER_SIZE` (`1200x800`).
-fn window_size() -> Option<(u32, u32)> {
-    let raw = std::env::var("TONTOO_BROWSER_SIZE").ok()?;
-    let (w, h) = raw.split_once(['x', 'X'])?;
-    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
-}
-
-/// Add-ons the managed profile installs at startup.
-///
-/// `TONTOO_BROWSER_EXTENSIONS` is a comma separated list of AMO add-on
-/// ids; the default is the TontooOS curated set. Firefox downloads and
-/// updates them itself through the profile policy.
-fn managed_extensions() -> Vec<ExtensionPolicy> {
-    let list = std::env::var("TONTOO_BROWSER_EXTENSIONS")
-        .unwrap_or_else(|_| "uBlock0@raymondhill.net,jid1-MnnxcxisBPnSXQ@jetpack".into());
-    list.split(',')
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(|id| ExtensionPolicy::AddonId(id.to_string()))
-        .collect()
-}
-
-/// Turn typed text into a URL (`example.com` -> `https://example.com`).
 fn normalize_url(text: &str) -> String {
-    let text = text.trim();
+    let text = text.trim().to_string();
     if text.is_empty() {
         return start_url();
     }
     let lower = text.to_ascii_lowercase();
     for prefix in ["http://", "https://", "file://", "data:", "about:"] {
         if lower.starts_with(prefix) {
-            return text.to_string();
+            return text;
         }
     }
     format!("https://{text}")
 }
 
-#[derive(Clone, Copy)]
-enum NavCmd {
-    Back,
-    Forward,
-    Reload,
-    Go,
-    NewTab,
-}
-
-struct Toolbar {
+struct BrowserDemo {
     bar: Titlebar,
     back: Button,
     forward: Button,
     reload: Button,
-    tab: Button,
+    go: Button,
     url: BasicTextField,
     progress: LinearProgress,
+    web: WebViewContent,
     status: BasicText,
-    view: WebView,
     nav: Rc<RefCell<Option<NavCmd>>>,
     pending_keys: Vec<Key>,
     watcher: ThemeWatcher,
     focused: bool,
     bg: Color,
     command: Option<WindowCommand>,
-    /// Set when the engine could not be started at all.
-    failed: Option<String>,
 }
 
-impl Toolbar {
+impl BrowserDemo {
     fn new() -> Self {
         let nav: Rc<RefCell<Option<NavCmd>>> = Rc::new(RefCell::new(None));
         let press = |nav: &Rc<RefCell<Option<NavCmd>>>, cmd: NavCmd| {
             let nav = nav.clone();
             move || *nav.borrow_mut() = Some(cmd)
         };
-        let (view, failed) = match spawn_engine() {
-            Ok(view) => (view, None),
-            Err(e) => {
-                eprintln!("tontoo_browser: {e}");
-                (
-                    WebView::new(WebKitConfiguration::new()).expect("mock view always builds"),
-                    Some(e),
+        let url_text = start_url();
+        let config = WebKitConfiguration::new().start_url(url_text.clone());
+        let web = if env_flag("TONTOO_BROWSER_MOCK") {
+            WebViewContent::new(config).expect("mock web view")
+        } else {
+            WebViewContent::with_wpe(config).unwrap_or_else(|e| {
+                eprintln!("WPE unavailable ({e}); falling back to the placeholder engine");
+                WebViewContent::new(
+                    WebKitConfiguration::new().start_url(url_text.clone()),
                 )
-            }
+                .expect("mock web view")
+            })
         };
         let mut url = BasicTextField::new("Search or enter address");
-        url.set_text(view.url().unwrap_or_else(start_url));
+        url.set_text(url_text);
         Self {
             bar: Titlebar::new("Tontoo Browser"),
-            back: Button::new("Back").on_press(press(&nav, NavCmd::Back)),
-            forward: Button::new("Forward").on_press(press(&nav, NavCmd::Forward)),
+            back: Button::new("<").on_press(press(&nav, NavCmd::Back)),
+            forward: Button::new(">").on_press(press(&nav, NavCmd::Forward)),
             reload: Button::new("Reload").on_press(press(&nav, NavCmd::Reload)),
-            tab: Button::new("New Tab").on_press(press(&nav, NavCmd::NewTab)),
+            go: Button::new("Go").on_press(press(&nav, NavCmd::Go)),
             url,
             progress: LinearProgress::new(),
-            status: BasicText::new("Starting Firefox..."),
-            view,
+            web,
+            status: BasicText::new("Ready."),
             nav,
             pending_keys: Vec::new(),
             watcher: ThemeWatcher::new(),
             focused: true,
             bg: tontooui::renderer::window::BACKGROUND,
             command: None,
-            failed,
         }
     }
 
     fn navigate(&mut self, cmd: NavCmd) {
+        let view = self.web.web_view();
         match cmd {
-            NavCmd::Back => self.view.go_back(),
-            NavCmd::Forward => self.view.go_forward(),
-            NavCmd::Reload => self.view.reload(),
+            NavCmd::Back => view.go_back(),
+            NavCmd::Forward => view.go_forward(),
+            NavCmd::Reload => view.reload(),
             NavCmd::Go => {
                 let target = normalize_url(self.url.text_value());
                 self.url.set_text(target.clone());
-                if let Err(e) = self.view.load_url(&target) {
+                if let Err(e) = view.load_url(&target) {
                     self.status.set_text(format!("Invalid URL: {e}"));
                 }
             }
-            NavCmd::NewTab => {
-                self.view.new_tab("window");
-                self.status.set_text("New window requested");
-            }
         }
     }
-
-    /// Forward a key the address field did not want to Firefox.
-    fn forward_key(&self, key: Key) {
-        let name = match key {
-            Key::Enter => "Enter",
-            Key::Backspace => "Backspace",
-            Key::Escape => "Escape",
-            Key::Left => "ArrowLeft",
-            Key::Right => "ArrowRight",
-            Key::Up => "ArrowUp",
-            Key::Down => "ArrowDown",
-            _ => return,
-        };
-        self.view.press_key(name);
-    }
 }
 
-/// Launch Firefox and wrap it in a web view.
-fn spawn_engine() -> Result<WebView, String> {
-    let downloads = download_dir();
-    std::fs::create_dir_all(&downloads).map_err(|e| format!("download dir: {e}"))?;
-    let options = GeckoOptions {
-        // Chrome-less fullscreen is opt-in; see the module docs.
-        kiosk: env_flag("TONTOO_BROWSER_KIOSK"),
-        headless: env_flag("TONTOO_BROWSER_HEADLESS"),
-        private: env_flag("TONTOO_BROWSER_PRIVATE"),
-        download_dir: downloads,
-        window_size: window_size(),
-        start_url: Some(start_url()),
-        provision: true,
-        extensions: managed_extensions(),
-    };
-    let engine = GeckoEngine::launch(options)?;
-    let config = WebKitConfiguration::new().start_url(start_url());
-    WebView::with_engine(config, Arc::new(engine))
-        .map_err(|e| format!("web view: {}", e))
-        .map_err(|e: String| e)
-}
-
-impl App for Toolbar {
+impl App for BrowserDemo {
     fn draw(
         &mut self,
         scene: &mut Scene,
@@ -247,47 +158,48 @@ impl App for Toolbar {
         let focused = self.focused;
 
         // Fresh engine state before reading title/progress below.
-        self.view.pump_events();
-        let queued = self.nav.borrow_mut().take();
-        if let Some(cmd) = queued {
+        self.web.web_view().pump_events();
+        let cmd = self.nav.borrow_mut().take();
+        if let Some(cmd) = cmd {
             self.navigate(cmd);
         }
         for key in std::mem::take(&mut self.pending_keys) {
-            if self.url.is_selected() {
-                if key == Key::Enter {
+            if key == Key::Enter {
+                if self.url.is_selected() {
                     self.navigate(NavCmd::Go);
-                    continue;
                 }
+                continue;
+            }
+            if self.url.is_selected() {
                 self.url.key(key);
-            } else {
-                self.forward_key(key);
             }
         }
 
-        self.progress.set_progress(self.view.estimated_progress());
-        let (progress, loading) = (self.view.estimated_progress(), self.view.is_loading());
-        let url = self.view.url().unwrap_or_default();
-        let title = self.view.title().unwrap_or_else(|| "Untitled".into());
-        self.status.set_text(if let Some(failed) = &self.failed {
-            format!("Engine unavailable: {failed}")
-        } else if loading {
-            format!("Loading {}%  {url}", (progress * 100.0).round())
-        } else if self.view.engine_window().is_none() {
-            // Firefox is gone; say so instead of showing an empty status.
-            "Firefox is not running.".to_string()
+        let view = self.web.web_view();
+        self.progress.set_progress(view.estimated_progress());
+        let status = if view.is_loading() {
+            format!(
+                "Loading… {}%  {}",
+                (view.estimated_progress() * 100.0).round(),
+                view.url().unwrap_or_default()
+            )
         } else {
-            format!("{title}  {url}")
-        });
+            format!(
+                "{}  {}",
+                view.title().unwrap_or_else(|| "Untitled".into()),
+                view.url().unwrap_or_default()
+            )
+        };
+        self.status.set_text(status);
 
-        for button in [
-            &mut self.back,
-            &mut self.forward,
-            &mut self.reload,
-            &mut self.tab,
-        ] {
-            button.set_theme(palette.accent, dark);
-            button.set_focused(focused);
-        }
+        self.back.set_theme(palette.accent, dark);
+        self.back.set_focused(focused);
+        self.forward.set_theme(palette.accent, dark);
+        self.forward.set_focused(focused);
+        self.reload.set_theme(palette.accent, dark);
+        self.reload.set_focused(focused);
+        self.go.set_theme(palette.accent, dark);
+        self.go.set_focused(focused);
         self.url.set_theme(palette.accent, dark);
         self.url.set_focused(focused);
         self.progress.set_theme(palette.accent, dark);
@@ -302,34 +214,36 @@ impl App for Toolbar {
         self.bar.set_rect(viewport.x, viewport.y, viewport.width);
         self.bar.draw(scene, fonts);
 
-        let x0 = viewport.x + 12.0;
-        let mut x = x0;
-        let y = viewport.y + 31.0 + 6.0;
-        let row_h = 30.0f32;
-        for button in [
-            &mut self.back,
-            &mut self.forward,
-            &mut self.reload,
-            &mut self.tab,
-        ] {
+        // Toolbar row under the titlebar.
+        let cx = viewport.x + 12.0;
+        let mut x = cx;
+        let y = viewport.y + 31.0 + 8.0;
+        let content_w = viewport.width - 24.0;
+        for button in [&mut self.back, &mut self.forward, &mut self.reload] {
             let (bw, bh) = button.measure(fonts);
-            button.place(fonts, x, y, bw, bh.max(row_h));
+            button.place(fonts, x, y, bw, bh.max(30.0));
             button.draw(scene, fonts, images);
             x += bw + 8.0;
         }
-        let width = (viewport.x + viewport.width - 12.0 - x).max(120.0);
+        let (gw, gh) = self.go.measure(fonts);
         let (_, uh) = self.url.measure(fonts);
-        let field_h = uh.max(row_h);
-        self.url.place(fonts, x, y, width, field_h);
+        let row_h = uh.max(30.0).max(gh);
+        let field_w = (viewport.x + content_w - gw - 8.0 - x).max(120.0);
+        self.url.place(fonts, x, y, field_w, row_h);
         self.url.draw(scene, fonts, images);
+        self.go.place(fonts, x + field_w + 8.0, y, gw, row_h);
+        self.go.draw(scene, fonts, images);
 
-        let py = y + field_h + 6.0;
-        self.progress
-            .place(fonts, x0, py, viewport.width - 24.0, 6.0);
+        // Progress hairline, then the page, then the status line.
+        let py = y + row_h + 6.0;
+        self.progress.place(fonts, cx, py, content_w, 6.0);
         self.progress.draw(scene, fonts, images);
         let (sw, sh) = self.status.measure(fonts);
-        self.status
-            .place(fonts, x0, py + 10.0, sw.min(viewport.width - 24.0), sh);
+        let web_y = py + 10.0;
+        let web_h = (viewport.y + viewport.height - 4.0 - (sh + 6.0) - web_y).max(100.0);
+        self.web.place(fonts, cx, web_y, content_w, web_h);
+        self.web.draw(scene, fonts, images);
+        self.status.place(fonts, cx, web_y + web_h + 6.0, sw.min(content_w), sh);
         self.status.draw(scene, fonts, images);
     }
 
@@ -351,48 +265,42 @@ impl App for Toolbar {
             Some(TrafficAction::Minimize) => self.command = Some(WindowCommand::Minimize),
             Some(TrafficAction::Maximize) => self.command = Some(WindowCommand::ToggleMaximize),
             None => {
-                for button in [
-                    &mut self.back,
-                    &mut self.forward,
-                    &mut self.reload,
-                    &mut self.tab,
-                ] {
-                    button.mouse_down(x, y);
-                }
+                self.back.mouse_down(x, y);
+                self.forward.mouse_down(x, y);
+                self.reload.mouse_down(x, y);
+                self.go.mouse_down(x, y);
                 self.url.mouse_down(x, y);
+                self.web.mouse_down(x, y);
             }
         }
     }
 
     fn mouse_up(&mut self, x: f64, y: f64) {
-        for button in [
-            &mut self.back,
-            &mut self.forward,
-            &mut self.reload,
-            &mut self.tab,
-        ] {
-            button.mouse_up(x, y);
-        }
+        self.back.mouse_up(x, y);
+        self.forward.mouse_up(x, y);
+        self.reload.mouse_up(x, y);
+        self.go.mouse_up(x, y);
+        self.web.mouse_up(x, y);
     }
 
     fn mouse_move(&mut self, x: f64, y: f64) {
         self.bar.set_hover(x as f32, y as f32);
-        for button in [
-            &mut self.back,
-            &mut self.forward,
-            &mut self.reload,
-            &mut self.tab,
-        ] {
-            button.set_hover(x as f32, y as f32);
-        }
+        self.back.set_hover(x as f32, y as f32);
+        self.forward.set_hover(x as f32, y as f32);
+        self.reload.set_hover(x as f32, y as f32);
+        self.go.set_hover(x as f32, y as f32);
         self.url.set_hover(x as f32, y as f32);
+    }
+
+    fn mouse_wheel(&mut self, dx: f64, dy: f64) {
+        self.web.mouse_wheel(dx, dy);
     }
 
     fn text(&mut self, text: &str) {
         if self.url.is_selected() {
             self.url.type_text(text);
         } else {
-            self.view.input_text(text);
+            self.web.text(text);
         }
     }
 
@@ -415,13 +323,7 @@ impl App for Toolbar {
 }
 
 fn main() {
-    let toolbar = Toolbar::new();
-    if let Err(err) = run(
-        "Tontoo Browser",
-        TOOLBAR_WIDTH,
-        TOOLBAR_HEIGHT,
-        toolbar,
-    ) {
+    if let Err(err) = run("Tontoo Browser", 1000, 700, BrowserDemo::new()) {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
