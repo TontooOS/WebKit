@@ -267,6 +267,7 @@ impl GeckoRenderer {
             headless,
             private,
             download_dir,
+            window_size: Some((1200, 800)),
             start_url: Some("about:blank".to_string()),
             // The background updater owns provisioning here, so the mock
             // renderer can take over immediately.

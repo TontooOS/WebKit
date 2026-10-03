@@ -211,14 +211,12 @@ fn profile_prefs(port: u16, download_dir: &Path, private: bool) -> Vec<(String, 
         ("extensions.update.autoUpdateDefault".into(), "true".into()),
         ("extensions.getAddons.cache.enabled".into(), "true".into()),
         ("xpinstall.signatures.required".into(), "false".into()),
-        // Rendering: WebRender on every capable GPU, media autoplay on.
-        ("gfx.webrender.all".into(), "true".into()),
-        ("gfx.webrender.software".into(), "true".into()),
+        // Rendering: Firefox picks WebRender or software GL itself.
+        // Forcing it breaks hosts without hardware GL (WSLg, containers).
         ("media.autoplay.default".into(), "0".into()),
         ("media.autoplay.blocking_policy".into(), "0".into()),
         ("dom.webnotifications.enabled".into(), "true".into()),
         ("dom.push.enabled".into(), "true".into()),
-        ("dom.ipc.processCount".into(), "4".into()),
     ];
     if private {
         prefs.push(("browser.privatebrowsing.autostart".into(), "true".into()));
@@ -246,6 +244,7 @@ pub fn firefox_args(
     kiosk: bool,
     headless: bool,
     private: bool,
+    window_size: Option<(u32, u32)>,
     start_url: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
@@ -264,6 +263,9 @@ pub fn firefox_args(
     }
     if private {
         args.push("--private-window".to_string());
+    }
+    if let Some((width, height)) = window_size.filter(|(w, h)| *w > 0 && *h > 0) {
+        args.push(format!("--window-size={width},{height}"));
     }
     args.push(
         start_url
@@ -920,7 +922,13 @@ fn merge_json_object(
 /// Launch options for [`GeckoPage::launch`].
 #[derive(Debug, Clone)]
 pub struct GeckoOptions {
-    /// Hide the Firefox chrome and fill the screen.
+    /// Ask Firefox for fullscreen chrome-less mode (`--kiosk`).
+    ///
+    /// Off by default: `--kiosk` sends an `xdg_toplevel.fullscreen`
+    /// request, and a compositor that answers it with a 0 x 0 size makes
+    /// Firefox abort with `xdg_surface buffer (1 x 1) is larger than the
+    /// configured fullscreen state (0 x 0)`. Turn it on only when the
+    /// compositor implements fullscreen properly.
     pub kiosk: bool,
     /// No window at all (tests and headless servers).
     pub headless: bool,
@@ -928,6 +936,8 @@ pub struct GeckoOptions {
     pub private: bool,
     /// Where Firefox writes downloads.
     pub download_dir: PathBuf,
+    /// Initial window size in logical px (`--window-size=W,H`).
+    pub window_size: Option<(u32, u32)>,
     /// Page to open at startup.
     pub start_url: Option<String>,
     /// Download a Firefox build when none exists. `true` for apps that
@@ -947,6 +957,7 @@ impl Default for GeckoOptions {
             headless: false,
             private: false,
             download_dir: std::env::temp_dir(),
+            window_size: None,
             start_url: None,
             provision: true,
             extensions: Vec::new(),
@@ -996,6 +1007,7 @@ impl GeckoPage {
             options.kiosk,
             options.headless,
             options.private,
+            options.window_size,
             options.start_url.as_deref(),
         );
         eprintln!("tontoo-webengine: launching {}", bin.display());
@@ -1035,7 +1047,7 @@ impl GeckoPage {
 
     /// `session.new` and the initial event subscription.
     fn start_session(&self) -> Result<(), String> {
-        self.conn.call(
+        self.call(
             "session.new",
             JsonValue::Object(vec![("capabilities".to_string(), JsonValue::Object(vec![]))]),
         )?;
@@ -1055,7 +1067,7 @@ impl GeckoPage {
         static NOTED: std::sync::Once = std::sync::Once::new();
         for name in SUBSCRIBED_EVENTS {
             let one = JsonValue::Array(vec![JsonValue::Str(name.to_string())]);
-            if let Err(e) = self.conn.call_timeout(
+            if let Err(e) = self.call_timeout(
                 "session.subscribe",
                 JsonValue::Object(vec![("events".to_string(), one)]),
                 SUBSCRIBE_TIMEOUT,
@@ -1114,7 +1126,7 @@ impl GeckoPage {
             ),
             ("channel".to_string(), JsonValue::Str("tontoo".to_string())),
         ]);
-        match self.conn.call("script.addPreloadScript", params) {
+        match self.call("script.addPreloadScript", params) {
             Ok(_) => {}
             Err(e) => eprintln!(
                 "tontoo-webengine: script.addPreloadScript unavailable ({e}); \
@@ -1123,7 +1135,7 @@ impl GeckoPage {
         }
         // Older builds ignore the channel subscription; the console
         // fallback needs the log stream either way.
-        let _ = self.conn.call(
+        let _ = self.call(
             "session.subscribe",
             JsonValue::Object(vec![(
                 "events".to_string(),
@@ -1135,6 +1147,70 @@ impl GeckoPage {
     /// Firefox process id (the parent), for window lookups.
     pub fn pid(&self) -> u32 {
         self.child.lock().map(|c| c.id()).unwrap_or(0)
+    }
+
+    /// Directory where Firefox writes its crash reports
+    /// (`<profile>/crashes`).
+    pub fn crash_dir(&self) -> PathBuf {
+        self.profile.join("crashes")
+    }
+
+    /// Whether the browser process is gone, with the exit reason.
+    ///
+    /// On Unix a signal shows up as `signal N`; that is what a Wayland
+    /// protocol error looks like, because the client aborts on it.
+    pub fn exit_reason(&self) -> Option<String> {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = self.child.lock().ok()?;
+        let status = child.try_wait().ok()??;
+        Some(if let Some(signal) = status.signal() {
+            format!("killed by signal {signal}")
+        } else if status.success() {
+            "exited normally".to_string()
+        } else {
+            format!("exited with {}", status)
+        })
+    }
+
+    /// Turn a dead connection into an actionable message.
+    ///
+    /// A raw "closed connection" hides the interesting part: a Firefox
+    /// that died (crash, protocol error, user closed every window) is
+    /// reported with its exit reason and the crash-report directory.
+    fn enrich_error(&self, error: String) -> String {
+        let dead = error.contains("closed connection")
+            || error.contains("Connection reset")
+            || error.contains("Broken pipe")
+            || error.contains("websocket send");
+        if !dead {
+            return error;
+        }
+        match self.exit_reason() {
+            Some(reason) => format!(
+                "Firefox {reason}; crash reports in {}",
+                self.crash_dir().display()
+            ),
+            None => format!("{error} (Firefox is still running)"),
+        }
+    }
+
+    /// BiDi call with enriched error messages.
+    fn call(&self, method: &str, params: JsonValue) -> Result<JsonValue, String> {
+        self.conn
+            .call(method, params)
+            .map_err(|e| self.enrich_error(e))
+    }
+
+    /// BiDi call with a short timeout and enriched error messages.
+    fn call_timeout(
+        &self,
+        method: &str,
+        params: JsonValue,
+        timeout: Duration,
+    ) -> Result<JsonValue, String> {
+        self.conn
+            .call_timeout(method, params, timeout)
+            .map_err(|e| self.enrich_error(e))
     }
 
     /// The raw BiDi connection (advanced use).
@@ -1161,7 +1237,7 @@ impl GeckoPage {
 
     /// Re-read the top-level context from the context tree.
     pub fn refresh_context(&self) -> Result<String, String> {
-        let tree = self.conn.call(
+        let tree = self.call(
             "browsingContext.getTree",
             JsonValue::Object(vec![]),
         )?;
@@ -1183,7 +1259,7 @@ impl GeckoPage {
     /// accepted; `browsingContext.load` reports completion.
     pub fn navigate(&self, url: &str) -> Result<(), String> {
         let context = self.context_or_err()?;
-        self.conn.call(
+        self.call(
             "browsingContext.navigate",
             JsonValue::Object(vec![
                 ("context".to_string(), JsonValue::Str(context)),
@@ -1213,7 +1289,7 @@ impl GeckoPage {
     /// Reload, optionally bypassing the cache.
     pub fn reload(&self, ignore_cache: bool) -> Result<(), String> {
         let context = self.context_or_err()?;
-        self.conn.call(
+        self.call(
             "browsingContext.reload",
             JsonValue::Object(vec![
                 ("context".to_string(), JsonValue::Str(context)),
@@ -1237,7 +1313,7 @@ impl GeckoPage {
     /// Session history entries plus the current index.
     pub fn history(&self) -> Result<(Vec<String>, usize), String> {
         let context = self.context_or_err()?;
-        let value = self.conn.call(
+        let value = self.call(
             "browsingContext.history",
             JsonValue::Object(vec![("context".to_string(), JsonValue::Str(context))]),
         )?;
@@ -1274,7 +1350,7 @@ impl GeckoPage {
     /// Evaluate JavaScript in the active context and return a plain value.
     pub fn evaluate(&self, expression: &str) -> Result<JsonValue, String> {
         let context = self.context_or_err()?;
-        let value = self.conn.call(
+        let value = self.call(
             "script.evaluate",
             JsonValue::Object(vec![
                 ("expression".to_string(), JsonValue::Str(expression.to_string())),
@@ -1327,7 +1403,7 @@ impl GeckoPage {
             ("duration".to_string(), JsonValue::Integer(0)),
         ])];
         list.extend(actions);
-        self.conn.call(
+        self.call(
             "input.performActions",
             JsonValue::Object(vec![
                 ("context".to_string(), JsonValue::Str(context)),
@@ -1346,7 +1422,7 @@ impl GeckoPage {
 
     fn key_actions(&self, actions: Vec<JsonValue>) -> Result<(), String> {
         let context = self.context_or_err()?;
-        self.conn.call(
+        self.call(
             "input.performActions",
             JsonValue::Object(vec![
                 ("context".to_string(), JsonValue::Str(context)),
@@ -1457,7 +1533,7 @@ impl GeckoPage {
     /// headful Firefox window is sized by the compositor instead).
     pub fn set_viewport(&self, width: u32, height: u32, scale: f32) -> Result<(), String> {
         let context = self.context_or_err()?;
-        self.conn.call(
+        self.call(
             "browsingContext.setViewport",
             JsonValue::Object(vec![
                 ("context".to_string(), JsonValue::Str(context)),
@@ -1479,7 +1555,7 @@ impl GeckoPage {
 
     /// Open a new top-level window or tab.
     pub fn create_context(&self, kind: &str) -> Result<String, String> {
-        let value = self.conn.call(
+        let value = self.call(
             "browsingContext.create",
             JsonValue::Object(vec![("type".to_string(), JsonValue::Str(kind.to_string()))]),
         )?;
@@ -1492,7 +1568,7 @@ impl GeckoPage {
 
     /// Close a browsing context (tab or window).
     pub fn close_context(&self, context: &str) -> Result<(), String> {
-        self.conn.call(
+        self.call(
             "browsingContext.close",
             JsonValue::Object(vec![("context".to_string(), JsonValue::Str(context.to_string()))]),
         )?;
@@ -1501,7 +1577,7 @@ impl GeckoPage {
 
     /// Focus a context so its window comes to the front.
     pub fn activate_context(&self, context: &str) -> Result<(), String> {
-        self.conn.call(
+        self.call(
             "browsingContext.activate",
             JsonValue::Object(vec![("context".to_string(), JsonValue::Str(context.to_string()))]),
         )?;
@@ -1513,7 +1589,7 @@ impl GeckoPage {
     pub fn install_extension(&self, path: &Path) -> Result<String, String> {
         let absolute = std::fs::canonicalize(path)
             .map_err(|e| format!("extension path {}: {e}", path.display()))?;
-        let value = self.conn.call(
+        let value = self.call(
             "webExtension.install",
             JsonValue::Object(vec![(
                 "extensionData".to_string(),
@@ -1536,7 +1612,7 @@ impl GeckoPage {
 
     /// Installed extension ids as reported by Firefox.
     pub fn list_extensions(&self) -> Result<Vec<String>, String> {
-        let value = self.conn.call("webExtension.listExtensions", JsonValue::Object(vec![]))?;
+        let value = self.call("webExtension.listExtensions", JsonValue::Object(vec![]))?;
         let mut ids = Vec::new();
         if let Some(list) = value.get("extensions").and_then(|e| e.as_array()) {
             for entry in list {
@@ -1554,7 +1630,7 @@ impl GeckoPage {
         if let Some(domain) = domain.filter(|d| !d.trim().is_empty()) {
             filter.push(("domain".to_string(), JsonValue::Str(domain.to_string())));
         }
-        let value = self.conn.call(
+        let value = self.call(
             "storage.getCookies",
             JsonValue::Object(vec![("filter".to_string(), JsonValue::Object(filter))]),
         )?;
@@ -1628,7 +1704,7 @@ impl GeckoPage {
         if let Some(expires) = cookie.expires {
             fields.push(("expiry".to_string(), JsonValue::Float(expires as f64)));
         }
-        self.conn.call(
+        self.call(
             "storage.setCookie",
             JsonValue::Object(vec![("cookie".to_string(), JsonValue::Object(fields))]),
         )?;
@@ -1637,7 +1713,7 @@ impl GeckoPage {
 
     /// Delete every cookie matching name, domain and path.
     pub fn delete_cookie(&self, domain: &str, path: &str, name: &str) -> Result<(), String> {
-        self.conn.call(
+        self.call(
             "storage.deleteCookies",
             JsonValue::Object(vec![(
                 "filter".to_string(),
@@ -1653,11 +1729,11 @@ impl GeckoPage {
 
     /// Delete all cookies and the HTTP cache.
     pub fn clear_data(&self) -> Result<(), String> {
-        self.conn.call(
+        self.call(
             "storage.getCookies",
             JsonValue::Object(vec![]),
         )?;
-        self.conn.call(
+        self.call(
             "network.clearData",
             JsonValue::Object(vec![
                 ("dataTypes".to_string(), JsonValue::Array(vec![
@@ -1678,7 +1754,7 @@ impl GeckoPage {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        let _ = self.conn.call("browser.close", JsonValue::Object(vec![]));
+        let _ = self.call("browser.close", JsonValue::Object(vec![]));
         self.conn.close();
         if let Ok(mut child) = self.child.lock() {
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -2482,17 +2558,30 @@ mod tests {
     #[test]
     fn launch_arguments_carry_the_remote_port() {
         let profile = Path::new("/tmp/profile");
-        let args = firefox_args(profile, 4444, true, false, false, Some("https://x.test"));
+        let args = firefox_args(
+            profile,
+            4444,
+            true,
+            false,
+            false,
+            Some((1200, 800)),
+            Some("https://x.test"),
+        );
         assert!(args.contains(&"--remote-debugging-port".to_string()));
-        assert!(args.windows(2).any(|w| w[0] == "--remote-debugging-port"
-            && w[1] == "4444"));
+        assert!(args.iter().any(|a| a == "--window-size=1200,800"));
         assert!(args.contains(&"--kiosk".to_string()));
         assert_eq!(args.last().unwrap(), "https://x.test");
-        let headless = firefox_args(profile, 1, true, true, true, None);
+        let headless =
+            firefox_args(profile, 1, true, true, true, None, None);
         assert!(headless.contains(&"--headless".to_string()));
         assert!(!headless.contains(&"--kiosk".to_string()));
         assert!(headless.contains(&"--private-window".to_string()));
+        assert!(!headless.iter().any(|a| a.starts_with("--window-size")));
         assert_eq!(headless.last().unwrap(), "about:blank");
+        // Kiosk is opt-in: it is a fullscreen request, and compositors
+        // that answer with a 0 x 0 size abort Firefox.
+        let default_args = firefox_args(profile, 1, false, false, false, None, None);
+        assert!(!default_args.contains(&"--kiosk".to_string()));
     }
 
     #[test]

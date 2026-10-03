@@ -196,6 +196,7 @@ fn gecko_end_to_end() {
         headless: true,
         private: true,
         download_dir: downloads.clone(),
+        window_size: None,
         start_url: Some("about:blank".to_string()),
         provision,
         extensions: Vec::new(),

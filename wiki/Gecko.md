@@ -85,8 +85,8 @@ edits the file; it uses `prefs.js`.
 | `browser.download.useDownloadDir` | `true` | No save dialog |
 | `browser.tabs.inTitlebar` | `0` | Firefox chrome is hidden; the host draws it |
 | `datareporting.*`, `toolkit.telemetry.*` | disabled | No telemetry, no studies |
-| `gfx.webrender.all` | `true` | WebRender on |
-| `dom.ipc.processCount` | `4` | Content process isolation |
+| `gfx.webrender.*` | unset | Let Firefox pick WebRender or software GL; forcing it breaks hosts without hardware GL |
+| `media.autoplay.*` | permissive | Videos play without a user gesture |
 
 > **Note:** `xpinstall.signatures.required` is honoured on ESR and
 > DevEdition builds. Official release builds ignore it and then only
@@ -111,10 +111,32 @@ fn firefox_args(
 | `--profile <dir>` | always | Managed or temporary profile |
 | `--new-instance --no-remote` | always | Never attach to a running Firefox |
 | `--remote-debugging-port <port>` | always | BiDi WebSocket on loopback |
-| `--kiosk` | `kiosk && !headless` | Chrome hidden, window fills the screen |
+| `--window-size=W,H` | `window_size` set | Initial window size |
+| `--kiosk` | `kiosk && !headless` | Chrome-less fullscreen (opt-in, see below) |
 | `--headless` | `headless` | No window (tests, servers) |
 | `--private-window` | `private` | Ephemeral session |
 | start URL | always | `about:blank` when empty |
+
+> **Note:** `kiosk` defaults to **off**. `--kiosk` sends an
+> `xdg_toplevel.fullscreen` request; a compositor that confirms it with a
+> `0 x 0` size aborts Firefox with
+> `xdg_surface buffer (1 x 1) is larger than the configured fullscreen
+> state (0 x 0)` (seen on WSLg). TontooCompositor does not implement
+> `fullscreen_request` yet, so leave `TONTOO_BROWSER_KIOSK` unset until
+> it does and use `TONTOO_BROWSER_SIZE=1200x800` instead.
+
+### When Firefox dies
+
+Every BiDi call goes through an enriching wrapper, so a dead connection
+reports the cause instead of `closed connection`:
+
+```text
+Firefox killed by signal 6; crash reports in /home/u/.local/share/tontoo-webengine/gecko/profile/crashes
+```
+
+`GeckoPage::exit_reason()` exposes the same information, and
+`GeckoPage::crash_dir()` the report directory (one subdir per crash with
+an `events` file holding the stack and the `MozCrashReason` line).
 
 ## BiDi mapping
 
@@ -236,6 +258,8 @@ next start.
 | `TONTOO_BROWSER_EXTENSIONS` | Comma separated AMO add-on ids of `tontoo_browser` |
 | `TONTOO_BROWSER_PRIVATE` | `1` starts an ephemeral private profile |
 | `TONTOO_BROWSER_HEADLESS` | `1` runs Firefox without a window |
+| `TONTOO_BROWSER_SIZE` | Firefox window size, e.g. `1200x800` |
+| `TONTOO_BROWSER_KIOSK` | `1` asks for chrome-less fullscreen (off by default) |
 | `TONTOO_E2E_TIMEOUT_SECS` | Per-step budget of `tests/gecko_bidi.rs` (default 90) |
 
 Provisioning is Linux-only: Mozilla ships a tarball there, while Windows
@@ -249,10 +273,11 @@ use std::sync::Arc;
 use webkit::{ExtensionPolicy, GeckoEngine, GeckoOptions, WebKitConfiguration, WebView};
 
 let options = GeckoOptions {
-    kiosk: true,
+    kiosk: false,
     headless: false,
     private: false,
     download_dir: std::env::temp_dir().join("tontoo-downloads"),
+    window_size: Some((1200, 800)),
     start_url: Some("https://example.com".to_string()),
     provision: true,
     extensions: vec![ExtensionPolicy::AddonId("uBlock0@raymondhill.net".into())],

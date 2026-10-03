@@ -116,6 +116,10 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
   `xdg-foreign-v2`, and Firefox has no offscreen rendering API. The
   browser chrome is a separate, draggable TontooUI window. See
   [Gecko.md](Gecko.md).
+- Chrome-less fullscreen (`--kiosk`) is **off by default**: it sends an
+  `xdg_toplevel.fullscreen` request, and a compositor that confirms with
+  a `0 x 0` size aborts Firefox. TontooCompositor does not implement
+  `fullscreen_request` yet. See [Gecko.md](Gecko.md).
 - `WebDriver::stopLoading` has no BiDi equivalent, so `stop_loading` calls
   `window.stop()` and the load event still completes.
 - Firefox auto-provisioning is Linux-only; on Windows and macOS the
@@ -126,6 +130,17 @@ WebKitConfiguration (start URL, settings, scripts, handlers, data store)
 
 ## Changelog
 
+- 2026-10-03: Firefox crash fix -- `GeckoOptions::kiosk` now defaults to
+  off and `window_size` was added. `--kiosk` sends an
+  `xdg_toplevel.fullscreen` request; a compositor answering it with a
+  `0 x 0` size aborts Firefox with `xdg_surface buffer (1 x 1) is larger
+  than the configured fullscreen state (0 x 0)` (reproduced on WSLg).
+  Forced `gfx.webrender.*` prefs were dropped so Firefox picks WebRender
+  or software GL itself, every BiDi call now reports
+  `GeckoPage::exit_reason()` plus the crash-report directory instead of
+  `closed connection`, and `GeckoOptions::extensions` /
+  `write_extension_policy` install add-ons through the profile policy
+  because Firefox 140 ESR has no BiDi `webExtension` module.
 - 2026-10-02: Gecko replaces Chromium -- `src/gecko.rs` launches headful
   Firefox and speaks WebDriver BiDi (`browsingContext`, `script`,
   `input`, `storage`, `network`, `log`, `webExtension`), `src/gecko.rs`

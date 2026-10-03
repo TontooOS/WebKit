@@ -22,6 +22,14 @@
 //! | `TONTOO_BROWSER_EXTENSIONS` | Comma separated AMO add-on ids to install |
 //! | `TONTOO_BROWSER_PRIVATE` | `1` starts an ephemeral private profile |
 //! | `TONTOO_BROWSER_HEADLESS` | `1` runs Firefox without a window (CI) |
+//! | `TONTOO_BROWSER_SIZE` | Firefox window size, e.g. `1200x800` |
+//! | `TONTOO_BROWSER_KIOSK` | `1` asks Firefox for chrome-less fullscreen |
+//!
+//! `TONTOO_BROWSER_KIOSK` is off by default on purpose: `--kiosk` sends an
+//! `xdg_toplevel.fullscreen` request, and a compositor that answers it
+//! with a 0 x 0 size aborts Firefox with `xdg_surface buffer (1 x 1) is
+//! larger than the configured fullscreen state (0 x 0)`. Enable it once
+//! the compositor handles fullscreen.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -57,6 +65,13 @@ fn download_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(base)
         .join("tontoo-webengine")
         .join("downloads")
+}
+
+/// Window size from `TONTOO_BROWSER_SIZE` (`1200x800`).
+fn window_size() -> Option<(u32, u32)> {
+    let raw = std::env::var("TONTOO_BROWSER_SIZE").ok()?;
+    let (w, h) = raw.split_once(['x', 'X'])?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
 /// Add-ons the managed profile installs at startup.
@@ -197,11 +212,12 @@ fn spawn_engine() -> Result<WebView, String> {
     let downloads = download_dir();
     std::fs::create_dir_all(&downloads).map_err(|e| format!("download dir: {e}"))?;
     let options = GeckoOptions {
-        // Chrome hidden: the TontooUI toolbar is the only browser chrome.
-        kiosk: true,
+        // Chrome-less fullscreen is opt-in; see the module docs.
+        kiosk: env_flag("TONTOO_BROWSER_KIOSK"),
         headless: env_flag("TONTOO_BROWSER_HEADLESS"),
         private: env_flag("TONTOO_BROWSER_PRIVATE"),
         download_dir: downloads,
+        window_size: window_size(),
         start_url: Some(start_url()),
         provision: true,
         extensions: managed_extensions(),
@@ -256,6 +272,9 @@ impl App for Toolbar {
             format!("Engine unavailable: {failed}")
         } else if loading {
             format!("Loading {}%  {url}", (progress * 100.0).round())
+        } else if self.view.engine_window().is_none() {
+            // Firefox is gone; say so instead of showing an empty status.
+            "Firefox is not running.".to_string()
         } else {
             format!("{title}  {url}")
         });
