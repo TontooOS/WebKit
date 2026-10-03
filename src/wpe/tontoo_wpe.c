@@ -50,6 +50,7 @@ struct TontooWpe {
     uint32_t frame_w;
     uint32_t frame_h;
     uint64_t frame_seq;
+    uint64_t displayed_calls;
 
     /* Event ring: callbacks only write here. */
     TontooWpeEvent ring[EVENT_RING];
@@ -217,9 +218,13 @@ int tontoo_wpe_next_event(TontooWpe *self, TontooWpeEvent *out)
 /* frames                                                                  */
 /* ---------------------------------------------------------------------- */
 
+static int debug_on = -1;
+
 static void on_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *buffer)
 {
     TontooWpe *self = data;
+    if (debug_on < 0)
+        debug_on = getenv("TONTOO_WPE_DEBUG") ? 1 : 0;
     struct wl_shm_buffer *shm = wpe_fdo_shm_exported_buffer_get_shm_buffer(buffer);
     if (!shm)
         return;
@@ -259,6 +264,10 @@ static void on_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *buffer
         }
         self->frame_seq++;
     }
+    if (debug_on)
+        fprintf(stderr, "[wpe] shm frame #%llu %dx%d displayed=%llu\n",
+                (unsigned long long)self->frame_seq, width, height,
+                (unsigned long long)self->displayed_calls);
     wl_shm_buffer_end_access(shm);
     if (!self->ready_sent) {
         self->ready_sent = 1;
@@ -287,8 +296,16 @@ static void on_set_size(void *data, uint32_t width, uint32_t height)
 
 static void on_frame_displayed(void *data)
 {
-    /* The SHM callback above already copied the pixels. */
-    (void)data;
+    TontooWpe *self = data;
+    /* The SHM callback above already copied the pixels. Asking for the next
+     * frame happens in tontoo_wpe_pump(), not here: calling
+     * wpe_view_backend_dispatch_frame_displayed() from inside the callback
+     * re-enters the backend synchronously and spins without ever returning to
+     * the GLib loop. */
+    self->displayed_calls++;
+    if (debug_on)
+        fprintf(stderr, "[wpe] frame_displayed #%llu\n",
+                (unsigned long long)self->displayed_calls);
 }
 
 static void on_activity_state_changed(void *data, uint32_t state)
@@ -750,6 +767,12 @@ TontooWpe *tontoo_wpe_new(uint32_t width, uint32_t height, const char *url, char
     wpe_view_backend_set_backend_client(self->backend, &self->client, self);
     wpe_view_backend_initialize(self->backend);
     wpe_view_backend_dispatch_set_size(self->backend, width, height);
+    /* Without an activity state WebKit treats the page as hidden: it stops
+     * requesting frames, throttles animations and suspends timers, so the
+     * first paint would be the only one. This view is always on screen and in
+     * a window; focus follows the host window. */
+    wpe_view_backend_add_activity_state(
+        self->backend, wpe_view_activity_state_visible | wpe_view_activity_state_in_window);
 
     g_signal_connect(self->view, "notify::title", G_CALLBACK(on_notify_title), self);
     g_signal_connect(self->view, "notify::uri", G_CALLBACK(on_notify_url), self);
@@ -793,9 +816,16 @@ void tontoo_wpe_free(TontooWpe *self)
 
 void tontoo_wpe_pump(TontooWpe *self, int ms)
 {
-    (void)self;
+    if (!self)
+        return;
     gint64 deadline = g_get_monotonic_time() + (gint64)ms * 1000;
     do {
+        /* One frame request per pump slice. This is the embedder side of the
+         * libwpe frame loop: WebKit paints, exports an shm buffer and tells us
+         * the frame was displayed, and the next request is what makes it ask
+         * again. Without it WebKit paints exactly once and every animation,
+         * video and caret blink freezes on that frame. */
+        wpe_view_backend_dispatch_frame_displayed(self->backend);
         while (g_main_context_pending(NULL))
             g_main_context_iteration(NULL, FALSE);
         g_usleep(1000);
